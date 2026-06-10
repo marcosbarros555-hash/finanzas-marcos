@@ -1,0 +1,7 @@
+{
+  "name": "finanzas-marcos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "App de finanzas personales: flujo mensual, portfolio IOL + Binance, metas de ahorro. Frontend estático + funciones serverless de Vercel + Supabase."
+}
