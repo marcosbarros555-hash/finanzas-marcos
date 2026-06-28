@@ -1,0 +1,17 @@
+{
+  "name": "Finanzas · Marcos",
+  "short_name": "Finanzas",
+  "description": "Flujo mensual, portfolio y metas de ahorro.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#2c3e7a",
+  "theme_color": "#2c3e7a",
+  "lang": "es-AR",
+  "icons": [
+    { "src": "/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" },
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any maskable" }
+  ]
+}

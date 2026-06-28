@@ -2,8 +2,8 @@
 // Finanzas · Marcos — app principal
 // ============================================================
 import { configOK, sb, sesionActual, enviarMagicLink, cerrarSesion, onAuthChange,
-         cargarTodo, guardarAjustes, agregarMovimiento, borrarMovimiento,
-         actualizarPosicionIOL, actualizarPosicionCrypto, actualizarMeta, importarSeed } from './db.js';
+         cargarTodo, guardarAjustes, agregarMovimiento, actualizarMovimiento, borrarMovimiento,
+         actualizarPosicionIOL, actualizarPosicionCrypto, actualizarMeta, insertarMeta, importarSeed } from './db.js';
 import { SEED } from './seed.js';
 import { preciosCedears, preciosCrypto, cclDelDia } from './precios.js';
 import { fmtARS, fmtUSD, fmtNum, fmtPct, signo, hoyISO, mesKey, mesActualKey,
@@ -15,15 +15,23 @@ const app = $('#app');
 const CAT_EGRESO = [
   { c: 'Alquiler + expensas', e: '🏠' }, { c: 'Comida', e: '🛒' }, { c: 'Uber / Transporte', e: '🚗' },
   { c: 'Internet', e: '📶' }, { c: 'Luz', e: '💡' }, { c: 'Gas', e: '🔥' },
-  { c: 'Cuota celular', e: '📱' }, { c: 'Cuota compu', e: '💻' }, { c: 'Inversión', e: '📈' },
+  { c: 'Cuota / transferencia', e: '📱' }, { c: 'Cuota compu', e: '💻' }, { c: 'Suscripciones', e: '📲' },
+  { c: 'Ropa', e: '👕' }, { c: 'Insumos / equipamiento', e: '🩺' }, { c: 'Inversión', e: '📈' },
   { c: 'Otro gasto', e: '📦' },
 ];
 const CAT_INGRESO = [
-  { c: 'Cobrado de pacientes', e: '🩺' }, { c: 'Sueldo', e: '🏦' }, { c: 'Domicilios', e: '🚶' },
+  { c: 'Cobrado de pacientes', e: '🩺' }, { c: 'Sueldo', e: '🏦' },
+  { c: 'Domicilios hechos', e: '🛵' }, { c: 'Domicilios cobrados', e: '🚶' },
   { c: 'Sesiones (producción)', e: '📋' }, { c: 'Otro ingreso', e: '➕' },
 ];
+const METAS_BASE = ['emergencia', 'consultorio', 'viaje', 'independencia'];
+const esDomicilioHecho = (c) => c === 'Domicilios hechos' || c === 'Domicilios (producción)';
 const EMOJI = {};
 [...CAT_EGRESO, ...CAT_INGRESO].forEach((x) => (EMOJI[x.c] = x.e));
+// alias para movimientos viejos previos a los renames
+EMOJI['Cuota celular'] = '📱';
+EMOJI['Domicilios'] = '🚶';
+EMOJI['Domicilios (producción)'] = '🛵';
 
 const ICONS = {
   inicio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>',
@@ -97,7 +105,8 @@ function calcPatrimonio(iol, crypto) {
 // Resumen de un mes: { ingresos, gastos, invertido, sesionesMonto, sesionesCant, cobrado, excedente }
 function resumenMes(key) {
   const movs = S.datos.movimientos.filter((m) => mesKey(m.fecha) === key);
-  let ingresos = 0, gastos = 0, invertido = 0, sesionesMonto = 0, sesionesCant = 0, cobrado = 0;
+  let ingresos = 0, gastos = 0, invertido = 0, sesionesMonto = 0, sesionesCant = 0,
+      domiMonto = 0, domiCant = 0, cobrado = 0;
   for (const m of movs) {
     if (m.tipo === 'ingreso') {
       ingresos += m.monto;
@@ -105,11 +114,16 @@ function resumenMes(key) {
     } else if (m.tipo === 'egreso') {
       if (m.categoria === 'Inversión') invertido += m.monto; else gastos += m.monto;
     } else if (m.tipo === 'sesiones') {
-      sesionesMonto += m.monto;
-      sesionesCant += m.cantidad || 0;
+      if (m.categoria === 'Domicilios hechos' || m.categoria === 'Domicilios (producción)') {
+        domiMonto += m.monto;
+        domiCant += m.cantidad || 0;
+      } else {
+        sesionesMonto += m.monto;
+        sesionesCant += m.cantidad || 0;
+      }
     }
   }
-  return { ingresos, gastos, invertido, sesionesMonto, sesionesCant, cobrado,
+  return { ingresos, gastos, invertido, sesionesMonto, sesionesCant, domiMonto, domiCant, cobrado,
            excedente: ingresos - gastos - invertido, movs };
 }
 
@@ -203,6 +217,10 @@ function vInicio() {
   const ult = S.datos.movimientos.slice(0, 6);
   const sinDatos = !S.datos.iol.length && !S.datos.crypto.length;
 
+  const pendientes = S.datos.movimientos.filter((m) => esDomicilioHecho(m.categoria));
+  const pendienteTotal = pendientes.reduce((a, m) => a + m.monto, 0);
+  const pendienteCant = pendientes.reduce((a, m) => a + (m.cantidad || 0), 0);
+
   const segs = [
     { valor: iol.total, color: 'var(--accent-text)', label: 'CEDEARs (IOL)' },
     { valor: cr.total * (S.ccl || 0), color: 'var(--pos)', label: 'Cripto (Binance)' },
@@ -246,10 +264,19 @@ function vInicio() {
       <h2>Producción del mes</h2>
       <div class="fila-metricas">
         <div class="mini-metric"><div class="lbl">Sesiones</div><div class="val num">${fmtNum(r.sesionesCant)} · ${fmtARS(r.sesionesMonto)}</div></div>
+        <div class="mini-metric"><div class="lbl">Domicilios hechos</div><div class="val num">${fmtNum(r.domiCant)} · ${fmtARS(r.domiMonto)}</div></div>
         <div class="mini-metric"><div class="lbl">Ya cobrado de pacientes</div><div class="val num">${fmtARS(r.cobrado)}</div></div>
         <div class="mini-metric"><div class="lbl">A cobrar a fin de mes</div><div class="val num ${signo(aCobrar)}">${fmtARS(Math.max(aCobrar, 0))}</div></div>
       </div>
     </div>
+
+    ${pendientes.length ? `
+    <div class="card">
+      <h2>Pendiente de cobro · domicilios
+        <span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${fmtNum(pendienteCant)} · ${fmtARS(pendienteTotal)}</span></h2>
+      <div class="lista-mov">${pendientes.map(filaPendiente).join('')}</div>
+      <p class="muted s" style="margin:10px 0 0">Cuando te transfieran, tocá <b>Cobrado</b> y pasa solo a ingresos.</p>
+    </div>` : ''}
 
     <div class="card">
       <h2>Últimos movimientos <button class="btn btn-chico btn-fantasma solo-mobile" id="btn-cargar-2">+ Cargar</button></h2>
@@ -269,6 +296,17 @@ function filaMov(m) {
     <div class="icono">${EMOJI[m.categoria] || '•'}</div>
     <div class="cuerpo"><div class="cat">${esc(m.categoria)}</div><div class="det">${esc(det)}</div></div>
     <div class="monto num ${cls}">${pref}${fmtARS(m.monto)}</div>
+    <button class="borrar" data-borrar="${m.id}" title="Borrar" aria-label="Borrar movimiento">✕</button>
+  </div>`;
+}
+
+function filaPendiente(m) {
+  const det = [fechaCorta(m.fecha), m.cantidad ? `${fmtNum(m.cantidad)}×` : '', m.descripcion].filter(Boolean).join(' · ');
+  return `<div class="mov">
+    <div class="icono">${EMOJI[m.categoria] || '🛵'}</div>
+    <div class="cuerpo"><div class="cat">Domicilios hechos</div><div class="det">${esc(det)}</div></div>
+    <div class="monto num">${fmtARS(m.monto)}</div>
+    <button class="btn btn-chico btn-fantasma" data-cobrar="${m.id}">Cobrado</button>
     <button class="borrar" data-borrar="${m.id}" title="Borrar" aria-label="Borrar movimiento">✕</button>
   </div>`;
 }
@@ -337,7 +375,7 @@ function vPortfolio() {
     <div class="card solo-desktop">
       <h2>IOL · CEDEARs <span class="s muted" style="text-transform:none;letter-spacing:0">cantidad y PPC editables</span></h2>
       <div class="tabla-scroll"><table>
-        <thead><tr><th>Activo</th><th>Cantidad</th><th>PPC</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th></tr></thead>
+        <thead><tr><th>Activo</th><th>Cantidad</th><th>PPC</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th></th></tr></thead>
         <tbody>
           ${iol.filas.map((p) => `<tr>
             <td><b>${esc(p.simbolo)}</b><span class="sub">${esc(p.nombre)}</span></td>
@@ -348,18 +386,20 @@ function vPortfolio() {
               : `<input class="celda-edit num" data-iol="${p.id}" data-campo="precio_manual" type="number" step="any" value="${p.precio_manual ?? ''}" placeholder="manual">`}</td>
             <td class="num">${fmtARS(p.valorizado)}</td>
             <td class="num ${signo(p.pnl)}">${fmtARS(p.pnl)}<span class="sub ${signo(p.pnl)}">${fmtPct(p.pnlPct)}</span></td>
+            <td><button class="btn btn-chico btn-fantasma" data-del-iol="${p.id}" title="Borrar posición">✕</button></td>
           </tr>`).join('')}
         </tbody>
         <tfoot><tr><td>Total</td><td></td><td class="num">${fmtARS(iol.costo)}</td><td></td>
           <td class="num">${fmtARS(iol.total)}</td>
-          <td class="num ${signo(iol.pnl)}">${fmtARS(iol.pnl)}<span class="sub ${signo(iol.pnl)}">${fmtPct(iol.pnlPct)}</span></td></tr></tfoot>
+          <td class="num ${signo(iol.pnl)}">${fmtARS(iol.pnl)}<span class="sub ${signo(iol.pnl)}">${fmtPct(iol.pnlPct)}</span></td><td></td></tr></tfoot>
       </table></div>
+      <button class="btn btn-chico btn-fantasma" id="btn-agregar-iol" style="margin-top:12px">+ Agregar CEDEAR</button>
     </div>
 
     <div class="card solo-desktop">
       <h2>Binance · Cripto</h2>
       <div class="tabla-scroll"><table>
-        <thead><tr><th>Activo</th><th>Cantidad</th><th>Precio compra</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th></tr></thead>
+        <thead><tr><th>Activo</th><th>Cantidad</th><th>Precio compra</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th></th></tr></thead>
         <tbody>
           ${cr.filas.map((p) => `<tr>
             <td><b>${esc(p.simbolo)}</b><span class="sub">${esc(p.nombre)}</span></td>
@@ -368,12 +408,14 @@ function vPortfolio() {
             <td class="num">${fmtUSD(p.px, true)}</td>
             <td class="num">${fmtUSD(p.valorizado, true)}</td>
             <td class="num ${signo(p.pnl)}">${fmtUSD(p.pnl, true)}<span class="sub ${signo(p.pnl)}">${fmtPct(p.pnlPct)}</span></td>
+            <td><button class="btn btn-chico btn-fantasma" data-del-cr="${p.id}" title="Borrar posición">✕</button></td>
           </tr>`).join('')}
         </tbody>
         <tfoot><tr><td>Total</td><td></td><td class="num">${fmtUSD(cr.costo, true)}</td><td></td>
           <td class="num">${fmtUSD(cr.total, true)}</td>
-          <td class="num ${signo(cr.pnl)}">${fmtUSD(cr.pnl, true)}<span class="sub ${signo(cr.pnl)}">${fmtPct(cr.pnlPct)}</span></td></tr></tfoot>
+          <td class="num ${signo(cr.pnl)}">${fmtUSD(cr.pnl, true)}<span class="sub ${signo(cr.pnl)}">${fmtPct(cr.pnlPct)}</span></td><td></td></tr></tfoot>
       </table></div>
+      <button class="btn btn-chico btn-fantasma" id="btn-agregar-crypto" style="margin-top:12px">+ Agregar cripto</button>
     </div>
   `;
 }
@@ -414,7 +456,7 @@ function vMetas() {
 
   return `
     <div class="card">
-      <h2>Metas de ahorro</h2>
+      <h2>Metas de ahorro <button class="btn btn-chico btn-fantasma" id="btn-nueva-meta">+ Nueva meta</button></h2>
       ${metas.map((m) => `
         <div class="meta">
           <div class="cab">
@@ -427,6 +469,7 @@ function vMetas() {
             <span style="display:flex;gap:6px">
               ${m.clave !== 'independencia' ? `<button class="btn btn-chico btn-fantasma" data-aportar="${m.id}">Aportar</button>` : ''}
               ${m.clave !== 'emergencia' ? `<button class="btn btn-chico btn-fantasma" data-objetivo="${m.id}" data-moneda="${m.moneda}">Editar objetivo</button>` : ''}
+              ${!METAS_BASE.includes(m.clave) ? `<button class="btn btn-chico btn-fantasma" data-borrar-meta="${m.id}">Borrar</button>` : ''}
             </span>
           </div>
           ${m.nota && m.proy ? `<div class="pie"><span>${esc(m.nota)}</span></div>` : ''}
@@ -445,6 +488,19 @@ function postRender(vista) {
       S.datos.movimientos = S.datos.movimientos.filter((m) => m.id !== b.dataset.borrar);
       render(); toast('Movimiento borrado');
     } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+  }));
+
+  vista.querySelectorAll('[data-cobrar]').forEach((b) => (b.onclick = async () => {
+    const m = S.datos.movimientos.find((x) => x.id === b.dataset.cobrar);
+    if (!m) return;
+    if (!confirm(`¿Marcar como cobrado ${fmtARS(m.monto)} de domicilios? Pasa a ingresos con fecha de hoy.`)) return;
+    const parcial = { tipo: 'ingreso', categoria: 'Domicilios cobrados', fecha: hoyISO() };
+    try {
+      await actualizarMovimiento(m.id, parcial);
+      Object.assign(m, parcial);
+      S.datos.movimientos.sort((a, c) => (a.fecha < c.fecha ? 1 : a.fecha > c.fecha ? -1 : 0));
+      render(); toast(`Cobrado ${fmtARS(m.monto)} ✔ — registrado como ingreso`);
+    } catch (e) { toast('No se pudo marcar: ' + e.message, false); }
   }));
 
   const seed = vista.querySelector('#btn-seed');
@@ -494,13 +550,59 @@ function postRender(vista) {
 
   vista.querySelectorAll('[data-objetivo]').forEach((b) => (b.onclick = async () => {
     const m = S.datos.metas.find((x) => x.id === b.dataset.objetivo);
-    const v = num(prompt(`Nuevo objetivo para "${m.nombre}" (${m.moneda}):`, m.objetivo));
+    const nombre = prompt('Nombre de la meta:', m.nombre);
+    if (nombre === null) return;
+    const v = num(prompt(`Nuevo objetivo para "${nombre.trim() || m.nombre}" (${m.moneda}):`, m.objetivo));
     if (v == null || v <= 0) return;
     try {
-      await actualizarMeta(m.id, { objetivo: v });
-      m.objetivo = v;
-      render(); toast('Objetivo actualizado');
+      const parcial = { objetivo: v };
+      if (nombre.trim()) parcial.nombre = nombre.trim();
+      await actualizarMeta(m.id, parcial);
+      Object.assign(m, parcial);
+      render(); toast('Meta actualizada');
     } catch (e) { toast('Error: ' + e.message, false); }
+  }));
+
+  const nm = vista.querySelector('#btn-nueva-meta');
+  if (nm) nm.onclick = () => abrirNuevaMeta();
+
+  vista.querySelectorAll('[data-borrar-meta]').forEach((b) => (b.onclick = async () => {
+    const m = S.datos.metas.find((x) => x.id === b.dataset.borrarMeta);
+    if (!confirm(`¿Borrar la meta "${m.nombre}"?`)) return;
+    try {
+      const { error } = await sb.from('metas').delete().eq('id', m.id);
+      if (error) throw new Error(error.message);
+      S.datos.metas = S.datos.metas.filter((x) => x.id !== m.id);
+      render(); toast('Meta borrada');
+    } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+  }));
+
+  const addIol = vista.querySelector('#btn-agregar-iol');
+  if (addIol) addIol.onclick = () => abrirAgregarIOL();
+
+  const addCr = vista.querySelector('#btn-agregar-crypto');
+  if (addCr) addCr.onclick = () => abrirAgregarCrypto();
+
+  vista.querySelectorAll('[data-del-iol]').forEach((b) => (b.onclick = async () => {
+    const p = S.datos.iol.find((x) => x.id === b.dataset.delIol);
+    if (!confirm(`¿Borrar ${p.simbolo} del portfolio?`)) return;
+    try {
+      const { error } = await sb.from('portfolio_iol').delete().eq('id', p.id);
+      if (error) throw new Error(error.message);
+      S.datos.iol = S.datos.iol.filter((x) => x.id !== p.id);
+      render(); toast('Posición borrada');
+    } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+  }));
+
+  vista.querySelectorAll('[data-del-cr]').forEach((b) => (b.onclick = async () => {
+    const p = S.datos.crypto.find((x) => x.id === b.dataset.delCr);
+    if (!confirm(`¿Borrar ${p.simbolo} del portfolio?`)) return;
+    try {
+      const { error } = await sb.from('portfolio_crypto').delete().eq('id', p.id);
+      if (error) throw new Error(error.message);
+      S.datos.crypto = S.datos.crypto.filter((x) => x.id !== p.id);
+      render(); toast('Posición borrada');
+    } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
   }));
 }
 
@@ -529,7 +631,7 @@ function pintarCarga() {
   const cats = cargaTipo === 'egreso' ? CAT_EGRESO : CAT_INGRESO;
   const aj = S.datos.ajustes || {};
   const esSesiones = cargaCat === 'Sesiones (producción)';
-  const esDomicilios = cargaCat === 'Domicilios';
+  const esDomicilios = cargaCat === 'Domicilios cobrados' || cargaCat === 'Domicilios hechos';
   const conCantidad = esSesiones || esDomicilios;
   const unidad = esSesiones ? (aj.valor_sesion || 0) : (aj.valor_domicilio || 35000);
 
@@ -582,7 +684,7 @@ function pintarCarga() {
     if (monto == null || monto <= 0) return toast('Ingresá un monto válido', false);
     const mov = {
       fecha: $('#f-fecha').value || hoyISO(),
-      tipo: cargaCat === 'Sesiones (producción)' ? 'sesiones' : cargaTipo,
+      tipo: cargaCat === 'Sesiones (producción)' || cargaCat === 'Domicilios hechos' ? 'sesiones' : cargaTipo,
       categoria: cargaCat,
       descripcion: $('#f-desc').value.trim(),
       cantidad: $('#f-cantidad') ? num($('#f-cantidad').value) : null,
@@ -625,6 +727,143 @@ function abrirAjustes() {
       S.datos.ajustes = { ...(S.datos.ajustes || {}), ...parcial };
       cerrarSheet(); render(); toast('Ajustes guardados ✔');
     } catch (e) { toast('Error: ' + e.message, false); }
+  };
+}
+
+// ---------------- Sheet: nueva meta ----------------
+function abrirNuevaMeta() {
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Nueva meta</h2>
+    <p class="muted s" style="margin:0 0 14px">Definí qué estás ahorrando y cuánto necesitás.</p>
+    <form id="form-meta" style="display:grid;gap:12px">
+      <div class="campo"><label>Nombre</label>
+        <input id="meta-nombre" type="text" maxlength="60" placeholder="Ej: Notebook nueva" required></div>
+      <div class="campos-2">
+        <div class="campo"><label>Moneda</label>
+          <select id="meta-moneda" style="width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--border);background:var(--bg);font-size:17px">
+            <option value="ARS">ARS</option><option value="USD">USD</option>
+          </select></div>
+        <div class="campo"><label>Objetivo</label>
+          <input id="meta-objetivo" type="number" inputmode="decimal" step="any" min="0" placeholder="0" required></div>
+      </div>
+      <button class="btn btn-primario" type="submit">Crear meta</button>
+    </form>
+  `);
+  $('#form-meta').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const nombre = $('#meta-nombre').value.trim();
+    const objetivo = num($('#meta-objetivo').value);
+    if (!nombre) return toast('Ingresá un nombre', false);
+    if (objetivo == null || objetivo <= 0) return toast('Ingresá un objetivo válido', false);
+    const orden = Math.max(0, ...S.datos.metas.map((m) => m.orden || 0)) + 1;
+    try {
+      const creada = await insertarMeta({
+        clave: 'meta_' + Date.now(),
+        nombre,
+        moneda: $('#meta-moneda').value,
+        objetivo,
+        acumulado: 0,
+        orden,
+      });
+      S.datos.metas.push(creada);
+      cerrarSheet(); render(); toast('Meta creada ✔');
+    } catch (e) { toast('No se pudo crear: ' + e.message, false); }
+  };
+}
+
+// ---------------- Sheet: agregar posición IOL ----------------
+function abrirAgregarIOL() {
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Agregar CEDEAR / FCI</h2>
+    <p class="muted s" style="margin:0 0 14px">Si es un FCI sin cotización en Yahoo, dejá el ticker vacío y cargá el precio manual.</p>
+    <form id="form-iol" style="display:grid;gap:12px">
+      <div class="campos-2">
+        <div class="campo"><label>Símbolo</label>
+          <input id="iol-simbolo" type="text" maxlength="12" placeholder="AAPL" required></div>
+        <div class="campo"><label>Nombre</label>
+          <input id="iol-nombre" type="text" maxlength="60" placeholder="Apple Inc."></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Cantidad</label>
+          <input id="iol-cantidad" type="number" inputmode="decimal" step="any" min="0" required></div>
+        <div class="campo"><label>PPC (ARS)</label>
+          <input id="iol-ppc" type="number" inputmode="decimal" step="any" min="0" required></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Ticker Yahoo</label>
+          <input id="iol-ticker" type="text" maxlength="20" placeholder="AAPL.BA"></div>
+        <div class="campo"><label>Precio manual (sin ticker)</label>
+          <input id="iol-manual" type="number" inputmode="decimal" step="any" min="0"></div>
+      </div>
+      <button class="btn btn-primario" type="submit">Agregar posición</button>
+    </form>
+  `);
+  $('#form-iol').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const simbolo = $('#iol-simbolo').value.trim().toUpperCase();
+    const cantidad = num($('#iol-cantidad').value);
+    const ppc = num($('#iol-ppc').value);
+    if (!simbolo || cantidad == null || ppc == null) return toast('Completá símbolo, cantidad y PPC', false);
+    const ticker = $('#iol-ticker').value.trim() || null;
+    const pos = {
+      simbolo,
+      nombre: $('#iol-nombre').value.trim(),
+      cantidad, ppc,
+      ticker_yahoo: ticker,
+      precio_manual: ticker ? null : num($('#iol-manual').value),
+    };
+    try {
+      const { data, error } = await sb.from('portfolio_iol').insert(pos).select().single();
+      if (error) throw new Error(error.message);
+      S.datos.iol.push(data);
+      S.datos.iol.sort((a, b) => a.simbolo.localeCompare(b.simbolo));
+      cerrarSheet(); render(); toast(`${simbolo} agregado ✔`);
+      if (ticker) refrescarPrecios();
+    } catch (e) { toast('No se pudo agregar: ' + e.message, false); }
+  };
+}
+
+// ---------------- Sheet: agregar posición cripto ----------------
+function abrirAgregarCrypto() {
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Agregar cripto</h2>
+    <p class="muted s" style="margin:0 0 14px">El precio actual se busca solo a partir del símbolo (ej: BTC).</p>
+    <form id="form-crypto" style="display:grid;gap:12px">
+      <div class="campos-2">
+        <div class="campo"><label>Símbolo</label>
+          <input id="cr-simbolo" type="text" maxlength="12" placeholder="BTC" required></div>
+        <div class="campo"><label>Nombre</label>
+          <input id="cr-nombre" type="text" maxlength="60" placeholder="Bitcoin"></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Cantidad</label>
+          <input id="cr-cantidad" type="number" inputmode="decimal" step="any" min="0" required></div>
+        <div class="campo"><label>Precio compra (USD)</label>
+          <input id="cr-precio" type="number" inputmode="decimal" step="any" min="0" required></div>
+      </div>
+      <button class="btn btn-primario" type="submit">Agregar posición</button>
+    </form>
+  `);
+  $('#form-crypto').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const simbolo = $('#cr-simbolo').value.trim().toUpperCase();
+    const cantidad = num($('#cr-cantidad').value);
+    const precio = num($('#cr-precio').value);
+    if (!simbolo || cantidad == null || precio == null) return toast('Completá símbolo, cantidad y precio', false);
+    const pos = {
+      simbolo,
+      nombre: $('#cr-nombre').value.trim(),
+      cantidad,
+      precio_compra_usd: precio,
+    };
+    try {
+      const { data, error } = await sb.from('portfolio_crypto').insert(pos).select().single();
+      if (error) throw new Error(error.message);
+      S.datos.crypto.push(data);
+      S.datos.crypto.sort((a, b) => a.simbolo.localeCompare(b.simbolo));
+      cerrarSheet(); render(); toast(`${simbolo} agregado ✔`);
+      refrescarPrecios();
+    } catch (e) { toast('No se pudo agregar: ' + e.message, false); }
   };
 }
 

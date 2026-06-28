@@ -72,6 +72,11 @@ export async function agregarMovimiento(mov) {
   return data;
 }
 
+export async function actualizarMovimiento(id, parcial) {
+  const { error } = await sb.from('movimientos').update(parcial).eq('id', id);
+  lanza(error);
+}
+
 export async function borrarMovimiento(id) {
   const { error } = await sb.from('movimientos').delete().eq('id', id);
   lanza(error);
@@ -90,6 +95,12 @@ export async function actualizarPosicionCrypto(id, parcial) {
 export async function actualizarMeta(id, parcial) {
   const { error } = await sb.from('metas').update(parcial).eq('id', id);
   lanza(error);
+}
+
+export async function insertarMeta(meta) {
+  const { data, error } = await sb.from('metas').insert(meta).select().single();
+  lanza(error);
+  return data;
 }
 
 // ---------------- Importación inicial ----------------
