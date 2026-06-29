@@ -7,7 +7,7 @@ import { configOK, sb, sesionActual, enviarMagicLink, cerrarSesion, onAuthChange
 import { SEED } from './seed.js';
 import { preciosCedears, preciosCrypto, cclDelDia } from './precios.js';
 import { fmtARS, fmtUSD, fmtNum, fmtPct, signo, hoyISO, mesKey, mesActualKey,
-         nombreMes, ultimosMeses, fechaCorta, esc, donutSVG, barrasSVG } from './utils.js';
+         nombreMes, ultimosMeses, fechaCorta, esc, donutSVG, barrasSVG, lineaSVG } from './utils.js';
 
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -242,8 +242,37 @@ function render() {
 const tabBtn = (id, label) =>
   `<button class="tab ${S.tab === id ? 'activo' : ''}" data-tab="${id}">${ICONS[id]}<span>${label}</span></button>`;
 
+// ---------------- Alertas (no invasivas, descartables vía localStorage) ----------------
+function alertaDescartada(id) { try { return localStorage.getItem('finz_alert_' + id) === '1'; } catch (e) { return false; } }
+function descartarAlerta(id) { try { localStorage.setItem('finz_alert_' + id, '1'); } catch (e) {} }
+
+function alertasActivas() {
+  const out = [];
+  const mes = mesActualKey();
+  // 1) Gastos fijos del mes todavía sin cargar
+  const FIJOS = ['Alquiler + expensas', 'Luz', 'Gas', 'Internet'];
+  const delMes = S.datos.movimientos.filter((m) => mesKey(m.fecha) === mes);
+  const faltan = FIJOS.filter((c) => !delMes.some((m) => m.categoria === c));
+  const idFijos = 'fijos_' + mes;
+  if (faltan.length && !alertaDescartada(idFijos)) {
+    out.push({ id: idFijos, icono: '🗓️', texto: `Gastos fijos sin cargar este mes: ${faltan.join(', ')}.` });
+  }
+  // 2) Domicilios hechos hace más de 14 días sin cobrar
+  const lim = new Date(); lim.setDate(lim.getDate() - 14);
+  const limISO = lim.toISOString().slice(0, 10);
+  const viejos = S.datos.movimientos.filter((m) => esDomicilioHecho(m.categoria) && m.fecha <= limISO);
+  const idDomi = 'domi14_' + mes;
+  if (viejos.length && !alertaDescartada(idDomi)) {
+    const tot = viejos.reduce((a, m) => a + m.monto, 0);
+    const pl = viejos.length > 1 ? 's' : '';
+    out.push({ id: idDomi, icono: '⏳', texto: `Tenés ${viejos.length} domicilio${pl} hecho${pl} hace +14 días sin cobrar (${fmtARS(tot)}). Marcalos abajo cuando te transfieran.` });
+  }
+  return out;
+}
+
 // ---------------- Vista: Inicio ----------------
 function vInicio() {
+  const alertas = alertasActivas();
   const iol = calcIOL(), cr = calcCrypto();
   const pat = calcPatrimonio(iol, cr);
   const r = resumenMes(mesActualKey());
@@ -265,6 +294,12 @@ function vInicio() {
   ];
 
   return `
+    ${alertas.map((a) => `<div class="card" style="display:flex;align-items:center;gap:10px;border-color:var(--accent-text);padding:13px 16px">
+      <span style="font-size:20px;flex:none">${a.icono}</span>
+      <span class="s" style="flex:1">${esc(a.texto)}</span>
+      <button class="borrar" data-descartar="${esc(a.id)}" title="Descartar" aria-label="Descartar aviso">✕</button>
+    </div>`).join('')}
+
     ${sinDatos ? `<div class="card"><h2>Primera vez</h2>
       <p class="muted s" style="margin:0 0 12px">Tu portfolio todavía está vacío. Importá tus posiciones de IOL y Binance, el efectivo y las metas con un click.</p>
       <button class="btn btn-primario" id="btn-seed">Cargar mis datos iniciales</button></div>` : ''}
@@ -372,6 +407,8 @@ function panelDonut(items, fmt) {
 
 // Mes seleccionado en el gráfico de gastos por categoría (Historial)
 let mesGastoSel = mesActualKey();
+// Filtros de la tabla de movimientos (Historial)
+let filtroMov = { mes: '', tipo: '', cat: '', limite: 50 };
 
 // ---------------- Vista: Historial ----------------
 function vHistorial() {
@@ -403,6 +440,8 @@ function vHistorial() {
       : `<div class="vacio">El historial se va a ir armando solo a medida que cargues movimientos.</div>`}
     </div>
 
+    ${cardMovimientos()}
+
     <div class="card">
       <h2>Exportar</h2>
       <p class="muted s" style="margin:0 0 12px">Descargá tus movimientos en un CSV (se abre en Excel o Google Sheets), con opción de filtrar por fechas.</p>
@@ -427,6 +466,68 @@ function cardGastosCategoria() {
     <div style="margin:0 0 14px"><select id="sel-mes-gasto" style="${SELECT_CSS};max-width:200px">${opciones}</select></div>
     ${items.length ? panelDonut(items, (v) => fmtARS(v))
       : `<div class="vacio">No hay gastos cargados en ${esc(nombreMes(mesGastoSel, true))}.</div>`}
+  </div>`;
+}
+
+// Tabla de todos los movimientos con filtros (mes / tipo / categoría) y paginación
+function coincideTipo(m, t) {
+  if (t === 'gasto') return m.tipo === 'egreso' && m.categoria !== 'Inversión';
+  if (t === 'inversion') return m.categoria === 'Inversión';
+  if (t === 'ingreso') return m.tipo === 'ingreso';
+  if (t === 'produccion') return m.tipo === 'sesiones';
+  return true;
+}
+
+function movsFiltrados() {
+  const f = filtroMov;
+  return S.datos.movimientos.filter((m) =>
+    (!f.mes || mesKey(m.fecha) === f.mes) &&
+    (!f.tipo || coincideTipo(m, f.tipo)) &&
+    (!f.cat || m.categoria === f.cat));
+}
+
+function cardMovimientos() {
+  const movs = movsFiltrados();
+  const visibles = movs.slice(0, filtroMov.limite);
+  const restantes = movs.length - visibles.length;
+  const mesesOpt = [...new Set(S.datos.movimientos.map((m) => mesKey(m.fecha)))].sort().reverse();
+  const catsOpt = [...new Set(S.datos.movimientos.map((m) => m.categoria))].sort();
+  const opt = (val, sel, txt) => `<option value="${esc(val)}" ${val === sel ? 'selected' : ''}>${esc(txt)}</option>`;
+  const tiposLbl = { '': 'Todos los tipos', gasto: 'Gastos', ingreso: 'Ingresos', inversion: 'Inversión', produccion: 'Producción' };
+
+  return `<div class="card">
+    <h2>Todos los movimientos <span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${movs.length}</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">
+      <select id="f-mov-mes" style="${SELECT_CSS};flex:1;min-width:130px">
+        ${opt('', filtroMov.mes, 'Todos los meses')}${mesesOpt.map((k) => opt(k, filtroMov.mes, nombreMes(k, true))).join('')}
+      </select>
+      <select id="f-mov-tipo" style="${SELECT_CSS};flex:1;min-width:120px">
+        ${Object.keys(tiposLbl).map((t) => opt(t, filtroMov.tipo, tiposLbl[t])).join('')}
+      </select>
+      <select id="f-mov-cat" style="${SELECT_CSS};flex:1;min-width:130px">
+        ${opt('', filtroMov.cat, 'Todas las categorías')}${catsOpt.map((c) => opt(c, filtroMov.cat, c)).join('')}
+      </select>
+    </div>
+    ${visibles.length ? `<div class="tabla-scroll"><table>
+      <thead><tr><th>Fecha</th><th>Categoría</th><th>Monto</th><th></th></tr></thead>
+      <tbody>
+        ${visibles.map((m) => {
+          const cls = m.tipo === 'ingreso' ? 'pos' : m.tipo === 'sesiones' ? 'muted' : 'neg';
+          const pref = m.tipo === 'ingreso' ? '+' : m.tipo === 'sesiones' ? '' : '−';
+          return `<tr>
+            <td style="white-space:nowrap">${esc(fechaCorta(m.fecha))}</td>
+            <td><b>${EMOJI[m.categoria] || '•'} ${esc(m.categoria)}</b>${m.descripcion ? `<span class="sub">${esc(m.descripcion)}</span>` : ''}</td>
+            <td class="num ${cls}" style="white-space:nowrap">${pref}${fmtARS(m.monto)}</td>
+            <td style="white-space:nowrap">
+              <button class="btn btn-chico btn-fantasma" data-editmov="${m.id}" title="Editar">✎</button>
+              <button class="borrar" data-borrar="${m.id}" title="Borrar movimiento">✕</button>
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table></div>
+    ${restantes > 0 ? `<button class="btn btn-fantasma" id="btn-mas-mov" style="margin-top:12px">Ver más (${restantes} restantes)</button>` : ''}`
+    : `<div class="vacio">No hay movimientos con esos filtros.</div>`}
   </div>`;
 }
 
@@ -517,6 +618,36 @@ const posCompacta = (sim, valTxt, pct) => `<div class="mov">
   <div class="num s ${signo(pct)}" style="min-width:64px;text-align:right">${fmtPct(pct)}</div>
 </div>`;
 
+// Proyección de patrimonio hacia el objetivo de independencia (gráfico de línea + fecha estimada)
+function panelIndependencia(objetivoUSD, actualUSD, excedentePromARS) {
+  if (!S.ccl) return `<div class="pie"><span class="muted">Necesito el CCL para proyectar — probá ↻ Precios.</span></div>`;
+  if (actualUSD >= objetivoUSD) return `<div class="pie"><span style="color:var(--pos)">🎉 ¡Ya alcanzaste el objetivo de independencia!</span></div>`;
+  const mensualUSD = excedentePromARS / S.ccl;
+  if (!(mensualUSD > 0)) {
+    return `<p class="muted s" style="margin:10px 0 0">📈 Para proyectar tu camino a la independencia necesitás al menos un mes con excedente positivo. Cargá ingresos y gastos y vuelvo a estimar.</p>`;
+  }
+  const meses = Math.ceil((objetivoUSD - actualUSD) / mensualUSD);
+  if (meses > 1200) {
+    return `<p class="muted s" style="margin:10px 0 0">Al ritmo actual el objetivo está a más de 100 años — subiendo el excedente mensual la proyección se vuelve útil.</p>`;
+  }
+  const pasos = Math.min(meses, 48);
+  const valores = [];
+  for (let i = 0; i <= pasos; i++) {
+    const mm = Math.round((i / pasos) * meses);
+    valores.push(Math.min(objetivoUSD, actualUSD + mm * mensualUSD));
+  }
+  const llegada = new Date();
+  llegada.setMonth(llegada.getMonth() + meses);
+  const fechaTxt = llegada.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
+  const anios = Math.floor(meses / 12), resto = meses % 12;
+  const dur = anios ? `${anios} año${anios > 1 ? 's' : ''}${resto ? ` y ${resto} m` : ''}` : `${meses} ${meses === 1 ? 'mes' : 'meses'}`;
+  return `<div style="margin-top:12px">
+    ${lineaSVG(valores, objetivoUSD)}
+    <p class="s" style="margin:10px 0 0">A ${fmtUSD(mensualUSD)}/mes de excedente llegás a ${fmtUSD(objetivoUSD)} en
+      <b style="color:var(--accent-text)">${esc(fechaTxt)}</b> <span class="muted">(~${dur})</span>.</p>
+  </div>`;
+}
+
 // ---------------- Vista: Metas ----------------
 function vMetas() {
   const iol = calcIOL(), cr = calcCrypto();
@@ -564,6 +695,7 @@ function vMetas() {
             </span>
           </div>
           ${m.nota && m.proy ? `<div class="pie"><span>${esc(m.nota)}</span></div>` : ''}
+          ${m.clave === 'independencia' ? panelIndependencia(m.objetivo, m.acumulado, excedenteProm) : ''}
         </div>`).join('')}
       <p class="muted s" style="margin:14px 0 0">La proyección usa tu excedente promedio de los últimos meses: ${fmtARS(excedenteProm)}/mes.</p>
     </div>
@@ -572,6 +704,10 @@ function vMetas() {
 
 // ---------------- Eventos post-render ----------------
 function postRender(vista) {
+  vista.querySelectorAll('[data-descartar]').forEach((b) => (b.onclick = () => {
+    descartarAlerta(b.dataset.descartar); render();
+  }));
+
   vista.querySelectorAll('[data-borrar]').forEach((b) => (b.onclick = async () => {
     if (!confirm('¿Borrar este movimiento?')) return;
     try {
@@ -613,6 +749,19 @@ function postRender(vista) {
 
   const exp = vista.querySelector('#btn-export');
   if (exp) exp.onclick = () => abrirExport();
+
+  const fMes = vista.querySelector('#f-mov-mes');
+  if (fMes) fMes.onchange = () => { filtroMov.mes = fMes.value; filtroMov.limite = 50; render(); };
+  const fTipo = vista.querySelector('#f-mov-tipo');
+  if (fTipo) fTipo.onchange = () => { filtroMov.tipo = fTipo.value; filtroMov.limite = 50; render(); };
+  const fCat = vista.querySelector('#f-mov-cat');
+  if (fCat) fCat.onchange = () => { filtroMov.cat = fCat.value; filtroMov.limite = 50; render(); };
+  const masMov = vista.querySelector('#btn-mas-mov');
+  if (masMov) masMov.onclick = () => { filtroMov.limite += 50; render(); };
+  vista.querySelectorAll('[data-editmov]').forEach((b) => (b.onclick = () => {
+    const m = S.datos.movimientos.find((x) => x.id === b.dataset.editmov);
+    if (m) abrirCargaEdit(m);
+  }));
 
   vista.querySelectorAll('[data-iol]').forEach((inp) => (inp.onchange = async () => {
     const v = num(inp.value); if (v == null) return;
@@ -708,6 +857,7 @@ function postRender(vista) {
 // ============================================================
 let cargaTipo = 'egreso';
 let cargaCat = null;
+let cargaEdit = null; // movimiento en edición, o null para alta nueva
 
 function abrirSheet(html) {
   $('#sheet').innerHTML = `<div class="manija"></div>${html}`;
@@ -720,7 +870,15 @@ function cerrarSheet() {
 }
 
 function abrirCarga(tipo = 'egreso') {
+  cargaEdit = null;
   cargaTipo = tipo; cargaCat = null;
+  pintarCarga();
+}
+
+function abrirCargaEdit(m) {
+  cargaEdit = m;
+  cargaTipo = m.tipo === 'egreso' ? 'egreso' : 'ingreso'; // producción vive en el segmento Ingreso
+  cargaCat = m.categoria;
   pintarCarga();
 }
 
@@ -733,6 +891,7 @@ function pintarCarga() {
   const unidad = esSesiones ? (aj.valor_sesion || 0) : (aj.valor_domicilio || 35000);
 
   abrirSheet(`
+    ${cargaEdit ? `<h2 style="margin:0 0 12px;font-size:18px">Editar movimiento</h2>` : ''}
     <div class="segmentos">
       <button class="seg-egreso ${cargaTipo === 'egreso' ? 'activo' : ''}" data-seg="egreso">Gasto</button>
       <button class="seg-ingreso ${cargaTipo === 'ingreso' ? 'activo' : ''}" data-seg="ingreso">Ingreso</button>
@@ -758,7 +917,7 @@ function pintarCarga() {
         <div class="campo"><label>Fecha</label><input id="f-fecha" type="date" value="${hoyISO()}" required></div>
         <div class="campo"><label>Nota (opcional)</label><input id="f-desc" type="text" maxlength="80" placeholder=""></div>
       </div>
-      <button class="btn btn-primario" type="submit">Confirmar ${cargaTipo === 'egreso' ? 'gasto' : 'ingreso'}</button>
+      <button class="btn btn-primario" type="submit">${cargaEdit ? 'Guardar cambios' : `Confirmar ${cargaTipo === 'egreso' ? 'gasto' : 'ingreso'}`}</button>
     </form>` : `<p class="muted s" style="text-align:center;margin:16px 0 6px">Elegí una categoría</p>`}
   `);
 
@@ -777,12 +936,23 @@ function pintarCarga() {
     recalc();
   }
 
+  // En modo edición, precargo los valores guardados (después del recalc para que no los pise)
+  if (cargaEdit && cargaCat) {
+    if ($('#f-fecha')) $('#f-fecha').value = cargaEdit.fecha;
+    if ($('#f-desc')) $('#f-desc').value = cargaEdit.descripcion || '';
+    if ($('#f-cantidad') && cargaEdit.cantidad) {
+      $('#f-cantidad').value = cargaEdit.cantidad;
+      if ($('#f-unidad')) $('#f-unidad').value = cargaEdit.monto / cargaEdit.cantidad;
+    }
+    if ($('#f-monto')) $('#f-monto').value = cargaEdit.monto;
+  }
+
   const form = $('#form-carga');
   if (form) form.onsubmit = async (ev) => {
     ev.preventDefault();
     const monto = num($('#f-monto').value);
     if (monto == null || monto <= 0) return toast('Ingresá un monto válido', false);
-    const mov = {
+    const datos = {
       fecha: $('#f-fecha').value || hoyISO(),
       tipo: cargaCat === 'Sesiones (producción)' || cargaCat === 'Domicilios hechos' ? 'sesiones' : cargaTipo,
       categoria: cargaCat,
@@ -791,10 +961,19 @@ function pintarCarga() {
       monto,
     };
     try {
-      const creado = await agregarMovimiento(mov);
-      S.datos.movimientos.unshift(creado);
-      cerrarSheet(); render();
-      toast(`${cargaTipo === 'egreso' ? 'Gasto' : 'Ingreso'} de ${fmtARS(monto)} registrado ✔`);
+      if (cargaEdit) {
+        await actualizarMovimiento(cargaEdit.id, datos);
+        Object.assign(cargaEdit, datos);
+        S.datos.movimientos.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0));
+        cargaEdit = null;
+        cerrarSheet(); render();
+        toast('Movimiento actualizado ✔');
+      } else {
+        const creado = await agregarMovimiento(datos);
+        S.datos.movimientos.unshift(creado);
+        cerrarSheet(); render();
+        toast(`${cargaTipo === 'egreso' ? 'Gasto' : 'Ingreso'} de ${fmtARS(monto)} registrado ✔`);
+      }
     } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
   };
 }

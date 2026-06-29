@@ -93,3 +93,27 @@ export function barrasSVG(datos, w = 640, h = 180) {
     ${barras.join('')}
   </svg>`;
 }
+
+// ------------------------------------------------------------
+// Línea SVG simple — valores: [n] (serie a graficar), objetivo: n (línea punteada de meta)
+// ------------------------------------------------------------
+export function lineaSVG(valores, objetivo, w = 560, h = 150) {
+  if (valores.length < 2) return '';
+  const max = Math.max(objetivo, ...valores);
+  const min = Math.min(0, ...valores);
+  const padB = 14, padT = 10;
+  const areaH = h - padB - padT;
+  const rango = max - min || 1;
+  const x = (i) => (i / (valores.length - 1)) * w;
+  const y = (v) => padT + areaH - ((v - min) / rango) * areaH;
+  const linea = valores.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+  const area = `M0 ${(padT + areaH).toFixed(1)} ` +
+    valores.map((v, i) => `L${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ') +
+    ` L${w} ${(padT + areaH).toFixed(1)} Z`;
+  const yObj = y(objetivo).toFixed(1);
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block" role="img" aria-label="Proyección de patrimonio">
+    <line x1="0" y1="${yObj}" x2="${w}" y2="${yObj}" stroke="var(--muted)" stroke-dasharray="5 4" opacity="0.55"/>
+    <path d="${area}" fill="var(--accent-soft)" opacity="0.55"/>
+    <path d="${linea}" fill="none" stroke="var(--accent-text)" stroke-width="2.5" stroke-linejoin="round"/>
+  </svg>`;
+}
