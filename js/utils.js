@@ -44,7 +44,8 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 export { esc };
 
 // ------------------------------------------------------------
-// Donut SVG — segments: [{ valor, color, label }]
+// Donut SVG — segments: [{ valor, color, label, titulo? }]
+// `titulo` (opcional) muestra un tooltip nativo al pasar el mouse por el sector.
 // ------------------------------------------------------------
 export function donutSVG(segments, size = 132, grosor = 16) {
   const total = segments.reduce((s, x) => s + Math.max(0, x.valor), 0);
@@ -58,7 +59,7 @@ export function donutSVG(segments, size = 132, grosor = 16) {
     const dash = frac * circ;
     const el = `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${grosor}"
       stroke-dasharray="${dash} ${circ - dash}" stroke-dashoffset="${-offset}"
-      transform="rotate(-90 ${c} ${c})" stroke-linecap="butt"/>`;
+      transform="rotate(-90 ${c} ${c})" stroke-linecap="butt">${s.titulo ? `<title>${esc(s.titulo)}</title>` : ''}</circle>`;
     offset += dash;
     return el;
   });

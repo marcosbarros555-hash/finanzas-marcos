@@ -289,11 +289,12 @@ function vInicio() {
           <div class="seg-eg" style="width:${pctEg}%"></div>
         </div>
         <div class="flujo-tot">
-          <span>Entró<br><b class="pos num">${fmtARS(r.ingresos)}</b></span>
+          <span>Entró<br><b class="pos num">${fmtARS(r.ingresos)}</b>${pendienteTotal > 0 ? `<br><span class="s num" style="color:var(--accent-text)" title="Domicilios hechos sin cobrar">⏳ +${fmtARS(pendienteTotal)}</span>` : ''}</span>
           <span>Gastos<br><b class="neg num">${fmtARS(r.gastos)}</b></span>
           <span>Invertido<br><b class="num" style="color:var(--accent-text)">${fmtARS(r.invertido)}</b></span>
-          <span>Queda<br><b class="num ${signo(r.excedente)}">${fmtARS(r.excedente)}</b></span>
+          <span>Queda<br><b class="num ${signo(r.excedente)}">${fmtARS(r.excedente)}</b>${pendienteTotal > 0 ? `<br><span class="s num" style="color:var(--accent-text)" title="Incluyendo lo pendiente de cobro">≈ ${fmtARS(r.excedente + pendienteTotal)}</span>` : ''}</span>
         </div>
+        ${pendienteTotal > 0 ? `<p class="muted s" style="margin:10px 0 0">⏳ Proyectado: suma ${fmtARS(pendienteTotal)} de domicilios hechos que todavía no cobraste. Los números reales no cambian hasta que toques <b>Cobrado</b>.</p>` : ''}
       </div>
     </div>
 
@@ -348,6 +349,30 @@ function filaPendiente(m) {
   </div>`;
 }
 
+// ---------------- Gráficos: paleta + donut con leyenda ----------------
+const PALETA = ['#5b8def', '#34c79a', '#f5a524', '#ef5da8', '#9b7bf0', '#22b8cf',
+  '#f06548', '#8bc34a', '#ffd23f', '#6c8cff', '#e573b5', '#4dd4ac', '#c98bf0', '#ff8a5c'];
+
+// items: [{ label, valor }] · fmt: formateador de moneda. Devuelve donut + leyenda con % y montos.
+function panelDonut(items, fmt) {
+  const segs = items.filter((x) => (x.valor || 0) > 0).sort((a, b) => b.valor - a.valor);
+  const total = segs.reduce((a, x) => a + x.valor, 0);
+  if (total <= 0) return '<div class="vacio">Sin datos para graficar.</div>';
+  const conColor = segs.map((s, i) => ({ ...s, color: PALETA[i % PALETA.length], pct: (s.valor / total) * 100 }));
+  return `<div class="patrimonio-cuerpo">
+    ${donutSVG(conColor.map((s) => ({ valor: s.valor, color: s.color, label: s.label,
+      titulo: `${s.label} · ${fmt(s.valor)} · ${s.pct.toFixed(1)}%` })))}
+    <div class="leyenda" style="flex:1;min-width:200px">
+      ${conColor.map((s) => `<div class="item"><span class="punto" style="background:${s.color}"></span>${esc(s.label)}
+        <b class="num" style="margin-left:auto">${fmt(s.valor)}</b>
+        <span class="s muted num" style="margin-left:10px;min-width:48px;text-align:right">${s.pct.toFixed(1)}%</span></div>`).join('')}
+    </div>
+  </div>`;
+}
+
+// Mes seleccionado en el gráfico de gastos por categoría (Historial)
+let mesGastoSel = mesActualKey();
+
 // ---------------- Vista: Historial ----------------
 function vHistorial() {
   const meses = ultimosMeses(12);
@@ -363,6 +388,8 @@ function vHistorial() {
         <span><span class="punto" style="background:var(--neg)"></span>Gastos + inversión</span>
       </div>
     </div>
+    ${cardGastosCategoria()}
+
     <div class="card">
       <h2>Detalle mes a mes</h2>
       ${conDatos.length ? conDatos.slice().reverse().map((d) => `
@@ -375,7 +402,32 @@ function vHistorial() {
         </div>`).join('')
       : `<div class="vacio">El historial se va a ir armando solo a medida que cargues movimientos.</div>`}
     </div>
+
+    <div class="card">
+      <h2>Exportar</h2>
+      <p class="muted s" style="margin:0 0 12px">Descargá tus movimientos en un CSV (se abre en Excel o Google Sheets), con opción de filtrar por fechas.</p>
+      <button class="btn btn-fantasma" id="btn-export">⬇ Exportar a CSV</button>
+    </div>
   `;
+}
+
+// Card de gastos del mes por categoría (con selector de mes)
+function cardGastosCategoria() {
+  const movsMes = S.datos.movimientos.filter(
+    (m) => mesKey(m.fecha) === mesGastoSel && m.tipo === 'egreso' && m.categoria !== 'Inversión');
+  const porCat = {};
+  movsMes.forEach((m) => { porCat[m.categoria] = (porCat[m.categoria] || 0) + m.monto; });
+  const items = Object.entries(porCat).map(([c, v]) => ({ label: `${EMOJI[c] || '•'} ${c}`, valor: v }));
+  const total = movsMes.reduce((a, m) => a + m.monto, 0);
+  const opciones = ultimosMeses(12).slice().reverse()
+    .map((k) => `<option value="${k}" ${k === mesGastoSel ? 'selected' : ''}>${esc(nombreMes(k, true))}</option>`).join('');
+
+  return `<div class="card">
+    <h2>En qué se va la plata ${total > 0 ? `<span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${fmtARS(total)}</span>` : ''}</h2>
+    <div style="margin:0 0 14px"><select id="sel-mes-gasto" style="${SELECT_CSS};max-width:200px">${opciones}</select></div>
+    ${items.length ? panelDonut(items, (v) => fmtARS(v))
+      : `<div class="vacio">No hay gastos cargados en ${esc(nombreMes(mesGastoSel, true))}.</div>`}
+  </div>`;
 }
 
 // ---------------- Vista: Portfolio ----------------
@@ -411,6 +463,7 @@ function vPortfolio() {
 
     <div class="card solo-desktop">
       <h2>IOL · CEDEARs <span class="s muted" style="text-transform:none;letter-spacing:0">cantidad y PPC editables</span></h2>
+      <div style="margin:0 0 16px">${panelDonut(iol.filas.map((p) => ({ label: p.simbolo, valor: p.valorizado })), (v) => fmtARS(v))}</div>
       <div class="tabla-scroll"><table>
         <thead><tr><th>Activo</th><th>Cantidad</th><th>PPC</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th></th></tr></thead>
         <tbody>
@@ -435,6 +488,7 @@ function vPortfolio() {
 
     <div class="card solo-desktop">
       <h2>Binance · Cripto</h2>
+      <div style="margin:0 0 16px">${panelDonut(cr.filas.map((p) => ({ label: p.simbolo, valor: p.valorizado })), (v) => fmtUSD(v, true))}</div>
       <div class="tabla-scroll"><table>
         <thead><tr><th>Activo</th><th>Cantidad</th><th>Precio compra</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th></th></tr></thead>
         <tbody>
@@ -553,6 +607,12 @@ function postRender(vista) {
 
   const c2 = vista.querySelector('#btn-cargar-2');
   if (c2) c2.onclick = () => abrirCarga();
+
+  const selMes = vista.querySelector('#sel-mes-gasto');
+  if (selMes) selMes.onchange = () => { mesGastoSel = selMes.value; render(); };
+
+  const exp = vista.querySelector('#btn-export');
+  if (exp) exp.onclick = () => abrirExport();
 
   vista.querySelectorAll('[data-iol]').forEach((inp) => (inp.onchange = async () => {
     const v = num(inp.value); if (v == null) return;
@@ -680,6 +740,8 @@ function pintarCarga() {
     <div class="botonera">
       ${cats.map((c) => `<button class="cat-btn ${cargaCat === c.c ? 'activo' : ''}" data-cat="${esc(c.c)}">
         <span class="emoji">${c.e}</span><span>${esc(c.c)}</span></button>`).join('')}
+      <button class="cat-btn" id="cat-add-inline" style="border-style:dashed;opacity:.85">
+        <span class="emoji">➕</span><span>Nueva</span></button>
     </div>
     ${cargaCat ? `
     <form id="form-carga">
@@ -702,6 +764,7 @@ function pintarCarga() {
 
   document.querySelectorAll('[data-seg]').forEach((b) => (b.onclick = () => { cargaTipo = b.dataset.seg; cargaCat = null; pintarCarga(); }));
   document.querySelectorAll('[data-cat]').forEach((b) => (b.onclick = () => { cargaCat = b.dataset.cat; pintarCarga(); setTimeout(() => $('#f-monto')?.focus(), 80); }));
+  $('#cat-add-inline').onclick = () => abrirFormCat(null, pintarCarga, cargaTipo);
 
   if (conCantidad) {
     const recalc = () => {
@@ -769,6 +832,47 @@ function abrirAjustes() {
   };
 }
 
+// ---------------- Sheet: exportar CSV ----------------
+function abrirExport() {
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Exportar a CSV</h2>
+    <p class="muted s" style="margin:0 0 14px">Dejá las fechas vacías para exportar todos los movimientos.</p>
+    <form id="form-exp" style="display:grid;gap:12px">
+      <div class="campos-2">
+        <div class="campo"><label>Desde</label><input id="exp-desde" type="date"></div>
+        <div class="campo"><label>Hasta</label><input id="exp-hasta" type="date"></div>
+      </div>
+      <button class="btn btn-primario" type="submit">Descargar CSV</button>
+    </form>
+  `);
+  $('#form-exp').onsubmit = (ev) => {
+    ev.preventDefault();
+    const desde = $('#exp-desde').value, hasta = $('#exp-hasta').value;
+    let movs = S.datos.movimientos.slice();
+    if (desde) movs = movs.filter((m) => m.fecha >= desde);
+    if (hasta) movs = movs.filter((m) => m.fecha <= hasta);
+    if (!movs.length) return toast('No hay movimientos en ese rango', false);
+    descargarCSV(movs);
+    cerrarSheet();
+  };
+}
+
+function descargarCSV(movs) {
+  const cell = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const filas = movs.slice()
+    .sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0))
+    .map((m) => [m.fecha, m.tipo, m.categoria, m.monto, m.descripcion || '']);
+  const csv = [['fecha', 'tipo', 'categoria', 'monto_ars', 'nota'], ...filas]
+    .map((r) => r.map(cell).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `finanzas-${hoyISO()}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  toast('CSV descargado ✔');
+}
+
 // ---------------- Sheet: categorías ----------------
 const SELECT_CSS = 'width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--border);background:var(--bg);font-size:17px';
 const grupoHdr = (g) => `<div class="s muted" style="text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin:12px 0 2px">${esc(g)}</div>`;
@@ -816,11 +920,11 @@ function pintarCategorias() {
   document.querySelectorAll('[data-cat-del]').forEach((b) => (b.onclick = () => borrarCategoria(b.dataset.catDel)));
 }
 
-function abrirFormCat(nombre) {
+function abrirFormCat(nombre, volver = pintarCategorias, tipoInicial = catSeg) {
   const user = catsUsuario();
   const cat = nombre ? user.find((x) => x.c === nombre) : null;
   const editar = !!cat;
-  const tipo = cat ? cat.tipo : catSeg;
+  const tipo = cat ? cat.tipo : tipoInicial;
   const rubros = [...new Set([...CAT_FIJAS, ...user].map((x) => x.grupo).filter(Boolean))].sort();
 
   abrirSheet(`
@@ -845,7 +949,7 @@ function abrirFormCat(nombre) {
     </form>
   `);
 
-  $('#cat-volver').onclick = () => pintarCategorias();
+  $('#cat-volver').onclick = volver;
   $('#form-cat').onsubmit = async (ev) => {
     ev.preventDefault();
     const nuevo = {
@@ -860,7 +964,7 @@ function abrirFormCat(nombre) {
       (x) => x.c.toLowerCase() === nuevo.c.toLowerCase() && (!cat || x.c !== cat.c));
     if (choca) return toast('Ya existe una categoría con ese nombre', false);
     const nuevaLista = editar ? lista.map((x) => (x.c === cat.c ? nuevo : x)) : [...lista, nuevo];
-    await guardarCats(nuevaLista, editar ? 'Categoría actualizada ✔' : 'Categoría creada ✔');
+    await guardarCats(nuevaLista, editar ? 'Categoría actualizada ✔' : 'Categoría creada ✔', volver);
   };
 }
 
@@ -870,13 +974,13 @@ async function borrarCategoria(nombre) {
   await guardarCats(nuevaLista, 'Categoría borrada');
 }
 
-async function guardarCats(lista, msg) {
+async function guardarCats(lista, msg, volver = pintarCategorias) {
   try {
     await guardarAjustes({ categorias: lista });
     S.datos.ajustes = { ...(S.datos.ajustes || {}), categorias: lista };
     refrescarCategorias();
-    render();           // refresca emojis en las vistas
-    pintarCategorias(); // y vuelve al listado del gestor
+    render();  // refresca emojis / botonera en las vistas
+    volver();  // y vuelve a la pantalla de origen (gestor o carga)
     toast(msg);
   } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
 }
