@@ -12,26 +12,63 @@ import { fmtARS, fmtUSD, fmtNum, fmtPct, signo, hoyISO, mesKey, mesActualKey,
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
 
-const CAT_EGRESO = [
-  { c: 'Alquiler + expensas', e: '🏠' }, { c: 'Comida', e: '🛒' }, { c: 'Uber / Transporte', e: '🚗' },
-  { c: 'Internet', e: '📶' }, { c: 'Luz', e: '💡' }, { c: 'Gas', e: '🔥' },
-  { c: 'Cuota / transferencia', e: '📱' }, { c: 'Cuota compu', e: '💻' }, { c: 'Suscripciones', e: '📲' },
-  { c: 'Ropa', e: '👕' }, { c: 'Insumos / equipamiento', e: '🩺' }, { c: 'Inversión', e: '📈' },
-  { c: 'Otro gasto', e: '📦' },
+// Categorías de SISTEMA: tienen lógica acoplada (producción, inversión, cobros).
+// No se editan ni borran desde la UI para no romper los cálculos.
+const CAT_FIJAS = [
+  { c: 'Cobrado de pacientes', e: '🩺', tipo: 'ingreso', grupo: 'Trabajo', fija: true },
+  { c: 'Domicilios hechos', e: '🛵', tipo: 'sesiones', grupo: 'Producción', fija: true },
+  { c: 'Domicilios cobrados', e: '🚶', tipo: 'ingreso', grupo: 'Trabajo', fija: true },
+  { c: 'Sesiones (producción)', e: '📋', tipo: 'sesiones', grupo: 'Producción', fija: true },
+  { c: 'Inversión', e: '📈', tipo: 'egreso', grupo: 'Inversión', fija: true },
 ];
-const CAT_INGRESO = [
-  { c: 'Cobrado de pacientes', e: '🩺' }, { c: 'Sueldo', e: '🏦' },
-  { c: 'Domicilios hechos', e: '🛵' }, { c: 'Domicilios cobrados', e: '🚶' },
-  { c: 'Sesiones (producción)', e: '📋' }, { c: 'Otro ingreso', e: '➕' },
+
+// Categorías por defecto (editables). Se usan hasta que el usuario las personaliza;
+// a partir de ahí viven en ajustes.categorias (columna jsonb).
+const CAT_DEFECTO = [
+  { c: 'Alquiler + expensas', e: '🏠', tipo: 'egreso', grupo: 'Vivienda' },
+  { c: 'Comida', e: '🛒', tipo: 'egreso', grupo: 'Comida' },
+  { c: 'Uber / Transporte', e: '🚗', tipo: 'egreso', grupo: 'Transporte' },
+  { c: 'Internet', e: '📶', tipo: 'egreso', grupo: 'Servicios' },
+  { c: 'Luz', e: '💡', tipo: 'egreso', grupo: 'Servicios' },
+  { c: 'Gas', e: '🔥', tipo: 'egreso', grupo: 'Servicios' },
+  { c: 'Cuota / transferencia', e: '📱', tipo: 'egreso', grupo: 'Familia' },
+  { c: 'Cuota compu', e: '💻', tipo: 'egreso', grupo: 'Familia' },
+  { c: 'Suscripciones', e: '📲', tipo: 'egreso', grupo: 'Ocio' },
+  { c: 'Ropa', e: '👕', tipo: 'egreso', grupo: 'Personal' },
+  { c: 'Insumos / equipamiento', e: '🩺', tipo: 'egreso', grupo: 'Trabajo' },
+  { c: 'Otro gasto', e: '📦', tipo: 'egreso', grupo: 'Otros' },
+  { c: 'Sueldo', e: '🏦', tipo: 'ingreso', grupo: 'Trabajo' },
+  { c: 'Otro ingreso', e: '➕', tipo: 'ingreso', grupo: 'Otros' },
 ];
-const METAS_BASE = ['emergencia', 'consultorio', 'viaje', 'independencia'];
+
 const esDomicilioHecho = (c) => c === 'Domicilios hechos' || c === 'Domicilios (producción)';
+
+// Categorías editables del usuario (las de la base, o las por defecto si todavía no tocó nada).
+const catsUsuario = () => (S.datos.ajustes?.categorias?.length ? S.datos.ajustes.categorias : CAT_DEFECTO);
+
+// Categorías que muestra la botonera de carga según el segmento elegido.
+function catsSegmento(seg) {
+  const user = catsUsuario();
+  if (seg === 'egreso') {
+    return [...user.filter((x) => x.tipo === 'egreso'), ...CAT_FIJAS.filter((x) => x.tipo === 'egreso')];
+  }
+  // Segmento "Ingreso": primero las fijas (cobros y producción), después las del usuario.
+  return [...CAT_FIJAS.filter((x) => x.tipo !== 'egreso'), ...user.filter((x) => x.tipo === 'ingreso')];
+}
+
 const EMOJI = {};
-[...CAT_EGRESO, ...CAT_INGRESO].forEach((x) => (EMOJI[x.c] = x.e));
-// alias para movimientos viejos previos a los renames
-EMOJI['Cuota celular'] = '📱';
-EMOJI['Domicilios'] = '🚶';
-EMOJI['Domicilios (producción)'] = '🛵';
+function poblarEmoji(lista) {
+  [...CAT_FIJAS, ...lista].forEach((x) => (EMOJI[x.c] = x.e));
+  // alias para movimientos viejos previos a los renames
+  EMOJI['Cuota celular'] = '📱';
+  EMOJI['Domicilios'] = '🚶';
+  EMOJI['Domicilios (producción)'] = '🛵';
+}
+function refrescarCategorias() {
+  for (const k of Object.keys(EMOJI)) delete EMOJI[k];
+  poblarEmoji(catsUsuario());
+}
+poblarEmoji(CAT_DEFECTO); // base inicial; se refresca con las del usuario al cargar datos
 
 const ICONS = {
   inicio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>',
@@ -469,7 +506,7 @@ function vMetas() {
             <span style="display:flex;gap:6px">
               ${m.clave !== 'independencia' ? `<button class="btn btn-chico btn-fantasma" data-aportar="${m.id}">Aportar</button>` : ''}
               ${m.clave !== 'emergencia' ? `<button class="btn btn-chico btn-fantasma" data-objetivo="${m.id}" data-moneda="${m.moneda}">Editar objetivo</button>` : ''}
-              ${!METAS_BASE.includes(m.clave) ? `<button class="btn btn-chico btn-fantasma" data-borrar-meta="${m.id}">Borrar</button>` : ''}
+              <button class="btn btn-chico btn-fantasma" data-borrar-meta="${m.id}">Borrar</button>
             </span>
           </div>
           ${m.nota && m.proy ? `<div class="pie"><span>${esc(m.nota)}</span></div>` : ''}
@@ -628,7 +665,7 @@ function abrirCarga(tipo = 'egreso') {
 }
 
 function pintarCarga() {
-  const cats = cargaTipo === 'egreso' ? CAT_EGRESO : CAT_INGRESO;
+  const cats = catsSegmento(cargaTipo);
   const aj = S.datos.ajustes || {};
   const esSesiones = cargaCat === 'Sesiones (producción)';
   const esDomicilios = cargaCat === 'Domicilios cobrados' || cargaCat === 'Domicilios hechos';
@@ -712,9 +749,11 @@ function abrirAjustes() {
         <input id="aj-domicilio" type="number" inputmode="decimal" step="any" min="0" value="${aj.valor_domicilio ?? 35000}"></div>
       <div class="campo"><label>Efectivo en mano (USD)</label>
         <input id="aj-efectivo" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_usd ?? 0}"></div>
+      <button type="button" class="btn btn-fantasma" id="aj-cats" style="justify-self:start">🏷️ Editar categorías</button>
       <button class="btn btn-primario" type="submit">Guardar ajustes</button>
     </form>
   `);
+  $('#aj-cats').onclick = () => abrirCategorias();
   $('#form-aj').onsubmit = async (ev) => {
     ev.preventDefault();
     const parcial = {
@@ -728,6 +767,118 @@ function abrirAjustes() {
       cerrarSheet(); render(); toast('Ajustes guardados ✔');
     } catch (e) { toast('Error: ' + e.message, false); }
   };
+}
+
+// ---------------- Sheet: categorías ----------------
+const SELECT_CSS = 'width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--border);background:var(--bg);font-size:17px';
+const grupoHdr = (g) => `<div class="s muted" style="text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin:12px 0 2px">${esc(g)}</div>`;
+let catSeg = 'egreso';
+
+function abrirCategorias() { pintarCategorias(); }
+
+function filaCat(c) {
+  return `<div class="mov">
+    <div class="icono">${c.e || '•'}</div>
+    <div class="cuerpo"><div class="cat">${esc(c.c)}</div><div class="det">${esc(c.grupo || 'Sin rubro')}</div></div>
+    <button class="btn btn-chico btn-fantasma" data-cat-edit="${esc(c.c)}">Editar</button>
+    <button class="borrar" data-cat-del="${esc(c.c)}" title="Borrar" aria-label="Borrar categoría">✕</button>
+  </div>`;
+}
+
+function pintarCategorias() {
+  const user = catsUsuario();
+  const delSeg = user.filter((x) => x.tipo === catSeg);
+  const fijasSeg = CAT_FIJAS.filter((x) => (catSeg === 'egreso' ? x.tipo === 'egreso' : x.tipo !== 'egreso'));
+  const grupos = {};
+  delSeg.forEach((c) => { (grupos[c.grupo || 'Sin rubro'] = grupos[c.grupo || 'Sin rubro'] || []).push(c); });
+
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Categorías</h2>
+    <p class="muted s" style="margin:0 0 12px">Agregá, renombrá o borrá tus categorías y agrupalas por rubro. Los movimientos ya cargados no se tocan.</p>
+    <div class="segmentos">
+      <button class="seg-egreso ${catSeg === 'egreso' ? 'activo' : ''}" data-catseg="egreso">Gastos</button>
+      <button class="seg-ingreso ${catSeg === 'ingreso' ? 'activo' : ''}" data-catseg="ingreso">Ingresos</button>
+    </div>
+    <div class="lista-mov" style="margin-top:6px">
+      ${Object.keys(grupos).sort().map((g) => grupoHdr(g) + grupos[g].map(filaCat).join('')).join('')
+        || `<div class="vacio">Todavía no tenés categorías propias de este tipo.</div>`}
+      ${fijasSeg.length ? grupoHdr('Fijas del sistema') + fijasSeg.map((c) => `<div class="mov" style="opacity:.55">
+        <div class="icono">${c.e}</div>
+        <div class="cuerpo"><div class="cat">${esc(c.c)}</div><div class="det">${esc(c.grupo || '')} · no editable</div></div>
+      </div>`).join('') : ''}
+    </div>
+    <button class="btn btn-primario" id="cat-nueva" style="margin-top:14px">+ Nueva categoría</button>
+  `);
+
+  document.querySelectorAll('[data-catseg]').forEach((b) => (b.onclick = () => { catSeg = b.dataset.catseg; pintarCategorias(); }));
+  $('#cat-nueva').onclick = () => abrirFormCat(null);
+  document.querySelectorAll('[data-cat-edit]').forEach((b) => (b.onclick = () => abrirFormCat(b.dataset.catEdit)));
+  document.querySelectorAll('[data-cat-del]').forEach((b) => (b.onclick = () => borrarCategoria(b.dataset.catDel)));
+}
+
+function abrirFormCat(nombre) {
+  const user = catsUsuario();
+  const cat = nombre ? user.find((x) => x.c === nombre) : null;
+  const editar = !!cat;
+  const tipo = cat ? cat.tipo : catSeg;
+  const rubros = [...new Set([...CAT_FIJAS, ...user].map((x) => x.grupo).filter(Boolean))].sort();
+
+  abrirSheet(`
+    <h2 style="margin:0 0 14px;font-size:18px">${editar ? 'Editar categoría' : 'Nueva categoría'}</h2>
+    <form id="form-cat" style="display:grid;gap:12px">
+      <div class="campos-2">
+        <div class="campo"><label>Emoji</label>
+          <input id="cat-emoji" type="text" maxlength="4" value="${cat ? esc(cat.e) : ''}" placeholder="🛒"></div>
+        <div class="campo"><label>Tipo</label>
+          <select id="cat-tipo" style="${SELECT_CSS}">
+            <option value="egreso" ${tipo === 'egreso' ? 'selected' : ''}>Gasto</option>
+            <option value="ingreso" ${tipo === 'ingreso' ? 'selected' : ''}>Ingreso</option>
+          </select></div>
+      </div>
+      <div class="campo"><label>Nombre</label>
+        <input id="cat-nombre" type="text" maxlength="40" value="${cat ? esc(cat.c) : ''}" placeholder="Ej: Farmacia" required></div>
+      <div class="campo"><label>Rubro (grupo grande)</label>
+        <input id="cat-grupo" type="text" maxlength="30" list="rubros-list" value="${cat ? esc(cat.grupo || '') : ''}" placeholder="Ej: Salud">
+        <datalist id="rubros-list">${rubros.map((g) => `<option value="${esc(g)}"></option>`).join('')}</datalist></div>
+      <button class="btn btn-primario" type="submit">${editar ? 'Guardar cambios' : 'Crear categoría'}</button>
+      <button type="button" class="btn btn-fantasma" id="cat-volver" style="justify-self:start">← Volver</button>
+    </form>
+  `);
+
+  $('#cat-volver').onclick = () => pintarCategorias();
+  $('#form-cat').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const nuevo = {
+      c: $('#cat-nombre').value.trim(),
+      e: $('#cat-emoji').value.trim() || '•',
+      tipo: $('#cat-tipo').value,
+      grupo: $('#cat-grupo').value.trim(),
+    };
+    if (!nuevo.c) return toast('Poné un nombre', false);
+    const lista = catsUsuario().slice();
+    const choca = [...CAT_FIJAS, ...lista].some(
+      (x) => x.c.toLowerCase() === nuevo.c.toLowerCase() && (!cat || x.c !== cat.c));
+    if (choca) return toast('Ya existe una categoría con ese nombre', false);
+    const nuevaLista = editar ? lista.map((x) => (x.c === cat.c ? nuevo : x)) : [...lista, nuevo];
+    await guardarCats(nuevaLista, editar ? 'Categoría actualizada ✔' : 'Categoría creada ✔');
+  };
+}
+
+async function borrarCategoria(nombre) {
+  if (!confirm(`¿Borrar la categoría "${nombre}"? Los movimientos ya cargados no se tocan.`)) return;
+  const nuevaLista = catsUsuario().filter((x) => x.c !== nombre);
+  await guardarCats(nuevaLista, 'Categoría borrada');
+}
+
+async function guardarCats(lista, msg) {
+  try {
+    await guardarAjustes({ categorias: lista });
+    S.datos.ajustes = { ...(S.datos.ajustes || {}), categorias: lista };
+    refrescarCategorias();
+    render();           // refresca emojis en las vistas
+    pintarCategorias(); // y vuelve al listado del gestor
+    toast(msg);
+  } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
 }
 
 // ---------------- Sheet: nueva meta ----------------
@@ -908,6 +1059,7 @@ function renderLogin() {
 async function boot() {
   try {
     S.datos = await cargarTodo();
+    refrescarCategorias();
   } catch (e) {
     app.innerHTML = `<div class="login"><div class="login-card">
       <h1>No se pudieron cargar tus datos</h1>

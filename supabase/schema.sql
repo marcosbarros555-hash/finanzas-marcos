@@ -9,8 +9,11 @@ create table if not exists ajustes (
   efectivo_usd numeric not null default 0,
   valor_sesion numeric not null default 0,
   valor_domicilio numeric not null default 35000,
+  categorias jsonb,                         -- categorías de ingreso/egreso editables por el usuario
   updated_at timestamptz not null default now()
 );
+-- Para bases ya creadas (idempotente): agrega la columna si todavía no existe
+alter table ajustes add column if not exists categorias jsonb;
 
 -- Portfolio CEDEARs / FCI en IOL
 create table if not exists portfolio_iol (
