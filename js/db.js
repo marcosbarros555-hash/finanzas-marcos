@@ -49,12 +49,20 @@ export async function cargarTodo() {
   ]);
   [aj, iol, cr, mov, metas].forEach((r) => lanza(r.error));
 
+  // Recurrentes: tolerante a que la tabla todavía no exista (Tanda 3 sin migrar aún)
+  let recurrentes = [];
+  try {
+    const rec = await sb.from('recurrentes').select('*').order('created_at');
+    if (!rec.error) recurrentes = rec.data || [];
+  } catch (e) { /* tabla aún no creada */ }
+
   return {
     ajustes: aj.data,
     iol: iol.data || [],
     crypto: cr.data || [],
     movimientos: mov.data || [],
     metas: metas.data || [],
+    recurrentes,
   };
 }
 
@@ -101,6 +109,42 @@ export async function insertarMeta(meta) {
   const { data, error } = await sb.from('metas').insert(meta).select().single();
   lanza(error);
   return data;
+}
+
+// ---------------- Aportes a metas ----------------
+export async function cargarAportes(metaId) {
+  const { data, error } = await sb.from('aportes').select('*').eq('meta_id', metaId)
+    .order('fecha', { ascending: false }).order('created_at', { ascending: false });
+  lanza(error);
+  return data || [];
+}
+
+export async function insertarAporte(aporte) {
+  const { data, error } = await sb.from('aportes').insert(aporte).select().single();
+  lanza(error);
+  return data;
+}
+
+export async function borrarAporte(id) {
+  const { error } = await sb.from('aportes').delete().eq('id', id);
+  lanza(error);
+}
+
+// ---------------- Gastos recurrentes ----------------
+export async function insertarRecurrente(rec) {
+  const { data, error } = await sb.from('recurrentes').insert(rec).select().single();
+  lanza(error);
+  return data;
+}
+
+export async function actualizarRecurrente(id, parcial) {
+  const { error } = await sb.from('recurrentes').update(parcial).eq('id', id);
+  lanza(error);
+}
+
+export async function borrarRecurrente(id) {
+  const { error } = await sb.from('recurrentes').delete().eq('id', id);
+  lanza(error);
 }
 
 // ---------------- Importación inicial ----------------

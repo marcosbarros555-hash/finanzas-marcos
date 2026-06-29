@@ -69,6 +69,30 @@ create table if not exists metas (
   created_at timestamptz not null default now()
 );
 
+-- Aportes individuales a cada meta (historial de ahorro)
+create table if not exists aportes (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  meta_id uuid not null references metas (id) on delete cascade,
+  monto numeric not null,
+  fecha date not null default current_date,
+  nota text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists aportes_meta on aportes (meta_id, fecha desc);
+
+-- Definiciones de gastos recurrentes mensuales
+create table if not exists recurrentes (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  categoria text not null,
+  monto numeric not null default 0,
+  descripcion text not null default '',
+  ultimo_mes text,                          -- 'AAAA-MM' del último mes confirmado
+  activo boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 -- ------------------------------------------------------------
 -- user_id automático en inserts (el cliente no necesita mandarlo)
 -- ------------------------------------------------------------
@@ -91,6 +115,10 @@ drop trigger if exists trg_uid_metas on metas;
 create trigger trg_uid_metas before insert on metas for each row execute function set_user_id();
 drop trigger if exists trg_uid_ajustes on ajustes;
 create trigger trg_uid_ajustes before insert on ajustes for each row execute function set_user_id();
+drop trigger if exists trg_uid_aportes on aportes;
+create trigger trg_uid_aportes before insert on aportes for each row execute function set_user_id();
+drop trigger if exists trg_uid_recurrentes on recurrentes;
+create trigger trg_uid_recurrentes before insert on recurrentes for each row execute function set_user_id();
 
 -- ------------------------------------------------------------
 -- Row Level Security: cada usuario ve y toca SOLO sus filas
@@ -100,11 +128,13 @@ alter table portfolio_iol enable row level security;
 alter table portfolio_crypto enable row level security;
 alter table movimientos enable row level security;
 alter table metas enable row level security;
+alter table aportes enable row level security;
+alter table recurrentes enable row level security;
 
 do $$
 declare t text;
 begin
-  foreach t in array array['ajustes','portfolio_iol','portfolio_crypto','movimientos','metas'] loop
+  foreach t in array array['ajustes','portfolio_iol','portfolio_crypto','movimientos','metas','aportes','recurrentes'] loop
     execute format('drop policy if exists "propietario_select" on %I', t);
     execute format('drop policy if exists "propietario_insert" on %I', t);
     execute format('drop policy if exists "propietario_update" on %I', t);

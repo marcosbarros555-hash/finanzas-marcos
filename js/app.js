@@ -3,7 +3,9 @@
 // ============================================================
 import { configOK, sb, sesionActual, enviarMagicLink, cerrarSesion, onAuthChange,
          cargarTodo, guardarAjustes, agregarMovimiento, actualizarMovimiento, borrarMovimiento,
-         actualizarPosicionIOL, actualizarPosicionCrypto, actualizarMeta, insertarMeta, importarSeed } from './db.js';
+         actualizarPosicionIOL, actualizarPosicionCrypto, actualizarMeta, insertarMeta,
+         cargarAportes, insertarAporte, borrarAporte,
+         insertarRecurrente, actualizarRecurrente, borrarRecurrente, importarSeed } from './db.js';
 import { SEED } from './seed.js';
 import { preciosCedears, preciosCrypto, cclDelDia } from './precios.js';
 import { fmtARS, fmtUSD, fmtNum, fmtPct, signo, hoyISO, mesKey, mesActualKey,
@@ -80,7 +82,7 @@ const ICONS = {
 
 const S = {
   session: null,
-  datos: { ajustes: null, iol: [], crypto: [], movimientos: [], metas: [] },
+  datos: { ajustes: null, iol: [], crypto: [], movimientos: [], metas: [], recurrentes: [] },
   precios: {},        // ticker_yahoo -> { precio, cierreAnterior }
   cryptoPx: {},       // 'BTC' -> precio USD
   ccl: null,
@@ -287,6 +289,9 @@ function vInicio() {
   const pendienteTotal = pendientes.reduce((a, m) => a + m.monto, 0);
   const pendienteCant = pendientes.reduce((a, m) => a + (m.cantidad || 0), 0);
 
+  const mesAct = mesActualKey();
+  const recPendientes = (S.datos.recurrentes || []).filter((rec) => rec.activo && rec.ultimo_mes !== mesAct);
+
   const segs = [
     { valor: iol.total, color: 'var(--accent-text)', label: 'CEDEARs (IOL)' },
     { valor: cr.total * (S.ccl || 0), color: 'var(--pos)', label: 'Cripto (Binance)' },
@@ -349,6 +354,20 @@ function vInicio() {
         <span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${fmtNum(pendienteCant)} · ${fmtARS(pendienteTotal)}</span></h2>
       <div class="lista-mov">${pendientes.map(filaPendiente).join('')}</div>
       <p class="muted s" style="margin:10px 0 0">Cuando te transfieran, tocá <b>Cobrado</b> y pasa solo a ingresos.</p>
+    </div>` : ''}
+
+    ${recPendientes.length ? `
+    <div class="card">
+      <h2>Gastos recurrentes a confirmar
+        <span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${recPendientes.length}</span></h2>
+      <div class="lista-mov">${recPendientes.map((rec) => `<div class="mov">
+        <div class="icono">${EMOJI[rec.categoria] || '🔁'}</div>
+        <div class="cuerpo"><div class="cat">${esc(rec.categoria)}</div><div class="det">${esc(rec.descripcion || 'gasto fijo mensual')}</div></div>
+        <input class="celda-edit num" data-recmonto="${rec.id}" type="number" step="any" value="${rec.monto}" style="max-width:120px">
+        <button class="btn btn-chico btn-primario" data-recconf="${rec.id}">Confirmar</button>
+        <button class="borrar" data-recskip="${rec.id}" title="Saltar este mes" aria-label="Saltar este mes">✕</button>
+      </div>`).join('')}</div>
+      <p class="muted s" style="margin:10px 0 0">Ajustá el monto si hace falta y <b>Confirmá</b> para cargarlo como gasto del mes, o ✕ para saltarlo.</p>
     </div>` : ''}
 
     <div class="card">
@@ -690,6 +709,7 @@ function vMetas() {
             <span>${esc(m.proy || m.nota)}</span>
             <span style="display:flex;gap:6px">
               ${m.clave !== 'independencia' ? `<button class="btn btn-chico btn-fantasma" data-aportar="${m.id}">Aportar</button>` : ''}
+              ${m.clave !== 'independencia' ? `<button class="btn btn-chico btn-fantasma" data-histaportes="${m.id}">Historial</button>` : ''}
               ${m.clave !== 'emergencia' ? `<button class="btn btn-chico btn-fantasma" data-objetivo="${m.id}" data-moneda="${m.moneda}">Editar objetivo</button>` : ''}
               <button class="btn btn-chico btn-fantasma" data-borrar-meta="${m.id}">Borrar</button>
             </span>
@@ -715,6 +735,34 @@ function postRender(vista) {
       S.datos.movimientos = S.datos.movimientos.filter((m) => m.id !== b.dataset.borrar);
       render(); toast('Movimiento borrado');
     } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+  }));
+
+  vista.querySelectorAll('[data-recconf]').forEach((b) => (b.onclick = async () => {
+    const rec = (S.datos.recurrentes || []).find((x) => x.id === b.dataset.recconf);
+    if (!rec) return;
+    const inp = vista.querySelector(`[data-recmonto="${rec.id}"]`);
+    const monto = num(inp?.value) ?? rec.monto;
+    if (monto == null || monto <= 0) return toast('Monto inválido', false);
+    try {
+      const creado = await agregarMovimiento({
+        fecha: hoyISO(), tipo: 'egreso', categoria: rec.categoria,
+        descripcion: rec.descripcion || '', cantidad: null, monto,
+      });
+      S.datos.movimientos.unshift(creado);
+      await actualizarRecurrente(rec.id, { ultimo_mes: mesActualKey() });
+      rec.ultimo_mes = mesActualKey();
+      render(); toast(`${esc(rec.categoria)} cargado ✔`);
+    } catch (e) { toast('No se pudo confirmar: ' + e.message, false); }
+  }));
+
+  vista.querySelectorAll('[data-recskip]').forEach((b) => (b.onclick = async () => {
+    const rec = (S.datos.recurrentes || []).find((x) => x.id === b.dataset.recskip);
+    if (!rec) return;
+    try {
+      await actualizarRecurrente(rec.id, { ultimo_mes: mesActualKey() });
+      rec.ultimo_mes = mesActualKey();
+      render(); toast('Salteado este mes');
+    } catch (e) { toast('Error: ' + e.message, false); }
   }));
 
   vista.querySelectorAll('[data-cobrar]').forEach((b) => (b.onclick = async () => {
@@ -783,15 +831,14 @@ function postRender(vista) {
     } catch (e) { toast('Error: ' + e.message, false); }
   }));
 
-  vista.querySelectorAll('[data-aportar]').forEach((b) => (b.onclick = async () => {
+  vista.querySelectorAll('[data-aportar]').forEach((b) => (b.onclick = () => {
     const m = S.datos.metas.find((x) => x.id === b.dataset.aportar);
-    const v = num(prompt(`¿Cuánto aportás a "${m.nombre}" (${m.moneda})?`));
-    if (v == null || v <= 0) return;
-    try {
-      await actualizarMeta(m.id, { acumulado: m.acumulado + v });
-      m.acumulado += v;
-      render(); toast('Aporte registrado');
-    } catch (e) { toast('Error: ' + e.message, false); }
+    if (m) abrirAportar(m);
+  }));
+
+  vista.querySelectorAll('[data-histaportes]').forEach((b) => (b.onclick = () => {
+    const m = S.datos.metas.find((x) => x.id === b.dataset.histaportes);
+    if (m) abrirHistAportes(m);
   }));
 
   vista.querySelectorAll('[data-objetivo]').forEach((b) => (b.onclick = async () => {
@@ -917,6 +964,9 @@ function pintarCarga() {
         <div class="campo"><label>Fecha</label><input id="f-fecha" type="date" value="${hoyISO()}" required></div>
         <div class="campo"><label>Nota (opcional)</label><input id="f-desc" type="text" maxlength="80" placeholder=""></div>
       </div>
+      ${cargaTipo === 'egreso' && !conCantidad && !cargaEdit ? `
+      <label style="display:flex;align-items:center;gap:9px;font-size:14px;cursor:pointer;color:var(--muted)">
+        <input id="f-recurrente" type="checkbox" style="width:18px;height:18px;flex:none"> Repetir todos los meses (gasto fijo)</label>` : ''}
       <button class="btn btn-primario" type="submit">${cargaEdit ? 'Guardar cambios' : `Confirmar ${cargaTipo === 'egreso' ? 'gasto' : 'ingreso'}`}</button>
     </form>` : `<p class="muted s" style="text-align:center;margin:16px 0 6px">Elegí una categoría</p>`}
   `);
@@ -971,6 +1021,16 @@ function pintarCarga() {
       } else {
         const creado = await agregarMovimiento(datos);
         S.datos.movimientos.unshift(creado);
+        // Si marcó "repetir todos los meses", creo la definición recurrente (ya confirmada este mes)
+        if (datos.tipo === 'egreso' && $('#f-recurrente')?.checked) {
+          try {
+            const rec = await insertarRecurrente({
+              categoria: datos.categoria, monto: datos.monto,
+              descripcion: datos.descripcion, ultimo_mes: mesActualKey(),
+            });
+            (S.datos.recurrentes = S.datos.recurrentes || []).push(rec);
+          } catch (e) { toast('Gasto guardado, pero no se pudo crear el recurrente: ' + e.message, false); }
+        }
         cerrarSheet(); render();
         toast(`${cargaTipo === 'egreso' ? 'Gasto' : 'Ingreso'} de ${fmtARS(monto)} registrado ✔`);
       }
@@ -991,11 +1051,15 @@ function abrirAjustes() {
         <input id="aj-domicilio" type="number" inputmode="decimal" step="any" min="0" value="${aj.valor_domicilio ?? 35000}"></div>
       <div class="campo"><label>Efectivo en mano (USD)</label>
         <input id="aj-efectivo" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_usd ?? 0}"></div>
-      <button type="button" class="btn btn-fantasma" id="aj-cats" style="justify-self:start">🏷️ Editar categorías</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" class="btn btn-fantasma" id="aj-cats">🏷️ Editar categorías</button>
+        <button type="button" class="btn btn-fantasma" id="aj-recurrentes">🔁 Gastos recurrentes</button>
+      </div>
       <button class="btn btn-primario" type="submit">Guardar ajustes</button>
     </form>
   `);
   $('#aj-cats').onclick = () => abrirCategorias();
+  $('#aj-recurrentes').onclick = () => abrirRecurrentes();
   $('#form-aj').onsubmit = async (ev) => {
     ev.preventDefault();
     const parcial = {
@@ -1162,6 +1226,170 @@ async function guardarCats(lista, msg, volver = pintarCategorias) {
     volver();  // y vuelve a la pantalla de origen (gestor o carga)
     toast(msg);
   } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
+}
+
+// ---------------- Sheet: gestor de gastos recurrentes ----------------
+function pintarRecurrentes() {
+  const recs = S.datos.recurrentes || [];
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Gastos recurrentes</h2>
+    <p class="muted s" style="margin:0 0 12px">Gastos fijos que se repiten cada mes. Al inicio de cada mes aparecen en Inicio para confirmar.</p>
+    <div class="lista-mov">
+      ${recs.length ? recs.map((rec) => `<div class="mov">
+        <div class="icono">${EMOJI[rec.categoria] || '🔁'}</div>
+        <div class="cuerpo"><div class="cat">${esc(rec.categoria)} ${rec.activo ? '' : '<span class="s muted">(pausado)</span>'}</div>
+          <div class="det">${esc([fmtARS(rec.monto), rec.descripcion].filter(Boolean).join(' · '))}</div></div>
+        <button class="btn btn-chico btn-fantasma" data-rec-edit="${rec.id}">Editar</button>
+        <button class="borrar" data-rec-del="${rec.id}" title="Borrar" aria-label="Borrar recurrente">✕</button>
+      </div>`).join('') : `<div class="vacio">Todavía no definiste gastos recurrentes. Creá uno o tildá "Repetir todos los meses" al cargar un gasto.</div>`}
+    </div>
+    <button class="btn btn-primario" id="rec-nuevo" style="margin-top:14px">+ Nuevo recurrente</button>
+  `);
+  $('#rec-nuevo').onclick = () => abrirFormRec(null);
+  document.querySelectorAll('[data-rec-edit]').forEach((b) => (b.onclick = () => abrirFormRec(b.dataset.recEdit)));
+  document.querySelectorAll('[data-rec-del]').forEach((b) => (b.onclick = () => borrarRec(b.dataset.recDel)));
+}
+
+function abrirRecurrentes() { pintarRecurrentes(); }
+
+function abrirFormRec(id) {
+  const rec = id ? (S.datos.recurrentes || []).find((x) => x.id === id) : null;
+  const editar = !!rec;
+  const egresos = catsSegmento('egreso');
+  abrirSheet(`
+    <h2 style="margin:0 0 14px;font-size:18px">${editar ? 'Editar recurrente' : 'Nuevo recurrente'}</h2>
+    <form id="form-rec" style="display:grid;gap:12px">
+      <div class="campo"><label>Categoría</label>
+        <select id="rec-cat" style="${SELECT_CSS}">
+          ${egresos.map((c) => `<option value="${esc(c.c)}" ${rec && rec.categoria === c.c ? 'selected' : ''}>${c.e} ${esc(c.c)}</option>`).join('')}
+        </select></div>
+      <div class="campos-2">
+        <div class="campo"><label>Monto (ARS)</label>
+          <input id="rec-monto" type="number" inputmode="decimal" step="any" min="0" value="${rec ? rec.monto : ''}" placeholder="0" required></div>
+        <div class="campo"><label>Nota (opcional)</label>
+          <input id="rec-desc" type="text" maxlength="80" value="${rec ? esc(rec.descripcion || '') : ''}"></div>
+      </div>
+      ${editar ? `<label style="display:flex;align-items:center;gap:9px;font-size:14px;cursor:pointer;color:var(--muted)">
+        <input id="rec-activo" type="checkbox" style="width:18px;height:18px;flex:none" ${rec.activo ? 'checked' : ''}> Activo (aparece para confirmar cada mes)</label>` : ''}
+      <button class="btn btn-primario" type="submit">${editar ? 'Guardar cambios' : 'Crear recurrente'}</button>
+      <button type="button" class="btn btn-fantasma" id="rec-volver" style="justify-self:start">← Volver</button>
+    </form>
+  `);
+  $('#rec-volver').onclick = () => pintarRecurrentes();
+  $('#form-rec').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const monto = num($('#rec-monto').value);
+    if (monto == null || monto <= 0) return toast('Ingresá un monto válido', false);
+    const datos = { categoria: $('#rec-cat').value, monto, descripcion: $('#rec-desc').value.trim() };
+    try {
+      if (editar) {
+        datos.activo = $('#rec-activo').checked;
+        await actualizarRecurrente(rec.id, datos);
+        Object.assign(rec, datos);
+        toast('Recurrente actualizado ✔');
+      } else {
+        const creado = await insertarRecurrente({ ...datos, ultimo_mes: null });
+        (S.datos.recurrentes = S.datos.recurrentes || []).push(creado);
+        toast('Recurrente creado ✔');
+      }
+      render(); pintarRecurrentes();
+    } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
+  };
+}
+
+async function borrarRec(id) {
+  const rec = (S.datos.recurrentes || []).find((x) => x.id === id);
+  if (!rec || !confirm(`¿Borrar el recurrente "${rec.categoria}"? Los gastos ya cargados no se tocan.`)) return;
+  try {
+    await borrarRecurrente(id);
+    S.datos.recurrentes = S.datos.recurrentes.filter((x) => x.id !== id);
+    render(); pintarRecurrentes(); toast('Recurrente borrado');
+  } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+}
+
+// ---------------- Sheet: aportar a meta ----------------
+function abrirAportar(m) {
+  abrirSheet(`
+    <h2 style="margin:0 0 14px;font-size:18px">Aportar a "${esc(m.nombre)}"</h2>
+    <form id="form-aporte" style="display:grid;gap:12px">
+      <div class="campo"><label>Monto (${esc(m.moneda)})</label>
+        <input id="ap-monto" class="input-monto" type="number" inputmode="decimal" step="any" min="0" placeholder="0" required></div>
+      <div class="campos-2">
+        <div class="campo"><label>Fecha</label><input id="ap-fecha" type="date" value="${hoyISO()}" required></div>
+        <div class="campo"><label>Nota (opcional)</label><input id="ap-nota" type="text" maxlength="80"></div>
+      </div>
+      <button class="btn btn-primario" type="submit">Registrar aporte</button>
+    </form>
+  `);
+  setTimeout(() => $('#ap-monto')?.focus(), 80);
+  $('#form-aporte').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const monto = num($('#ap-monto').value);
+    if (monto == null || monto <= 0) return toast('Ingresá un monto válido', false);
+    try {
+      const aporte = await insertarAporte({ meta_id: m.id, monto, fecha: $('#ap-fecha').value || hoyISO(), nota: $('#ap-nota').value.trim() });
+      await actualizarMeta(m.id, { acumulado: m.acumulado + monto });
+      m.acumulado += monto;
+      if (!S.aportes) S.aportes = {};
+      if (S.aportes[m.id]) S.aportes[m.id].unshift(aporte);
+      cerrarSheet(); render(); toast('Aporte registrado ✔');
+    } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
+  };
+}
+
+// ---------------- Sheet: historial de aportes ----------------
+async function abrirHistAportes(m) {
+  abrirSheet(`<div class="vacio">Cargando aportes…</div>`);
+  let aportes;
+  try {
+    aportes = await cargarAportes(m.id);
+    S.aportes = S.aportes || {}; S.aportes[m.id] = aportes;
+  } catch (e) {
+    return abrirSheet(`<h2 style="margin:0 0 8px;font-size:18px">Historial</h2>
+      <p class="aviso info s">No se pudieron cargar los aportes: ${esc(e.message)}. ¿Corriste el SQL de la Tanda 3 en Supabase?</p>`);
+  }
+
+  const fmt = m.moneda === 'USD' ? fmtUSD : fmtARS;
+  const total = aportes.reduce((a, x) => a + x.monto, 0);
+  const meses = new Set(aportes.map((x) => mesKey(x.fecha))).size;
+  const promMensual = meses ? total / meses : 0;
+  let objetivo = m.objetivo;
+  if (m.clave === 'emergencia') { const gp = promedio3m('gastos'); objetivo = gp > 0 ? gp * 3 : m.objetivo; }
+  const falta = objetivo - m.acumulado;
+  let estimado = '—';
+  if (promMensual > 0 && falta > 0) {
+    const n = Math.ceil(falta / promMensual);
+    if (n <= 1200) {
+      const d = new Date(); d.setMonth(d.getMonth() + n);
+      estimado = `${d.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })} (~${n} ${n === 1 ? 'mes' : 'meses'})`;
+    }
+  } else if (falta <= 0) estimado = '¡objetivo alcanzado! 🎉';
+
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Aportes · ${esc(m.nombre)}</h2>
+    <div class="fila-metricas" style="margin:6px 0 14px">
+      <div class="mini-metric"><div class="lbl">Total aportado</div><div class="val num">${fmt(total)}</div></div>
+      <div class="mini-metric"><div class="lbl">Promedio mensual</div><div class="val num">${fmt(promMensual)}</div></div>
+      <div class="mini-metric"><div class="lbl">Llegada estimada</div><div class="val s">${esc(estimado)}</div></div>
+    </div>
+    ${aportes.length ? `<div class="lista-mov">${aportes.map((x) => `<div class="mov">
+      <div class="cuerpo"><div class="cat">${fmt(x.monto)}</div><div class="det">${esc([fechaCorta(x.fecha), x.nota].filter(Boolean).join(' · '))}</div></div>
+      <button class="borrar" data-delaporte="${x.id}" title="Borrar aporte" aria-label="Borrar aporte">✕</button>
+    </div>`).join('')}</div>`
+      : `<div class="vacio">Todavía no registraste aportes a esta meta.</div>`}
+  `);
+
+  document.querySelectorAll('[data-delaporte]').forEach((b) => (b.onclick = async () => {
+    const ap = aportes.find((x) => x.id === b.dataset.delaporte);
+    if (!ap || !confirm(`¿Borrar este aporte de ${fmt(ap.monto)}?`)) return;
+    try {
+      await borrarAporte(ap.id);
+      await actualizarMeta(m.id, { acumulado: m.acumulado - ap.monto });
+      m.acumulado -= ap.monto;
+      if (S.aportes) delete S.aportes[m.id];
+      render(); abrirHistAportes(m);
+    } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+  }));
 }
 
 // ---------------- Sheet: nueva meta ----------------
