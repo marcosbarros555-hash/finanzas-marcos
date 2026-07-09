@@ -388,6 +388,7 @@ function filaMov(m) {
     <div class="icono">${EMOJI[m.categoria] || '•'}</div>
     <div class="cuerpo"><div class="cat">${esc(m.categoria)}</div><div class="det">${esc(det)}</div></div>
     <div class="monto num ${cls}">${pref}${fmtARS(m.monto)}</div>
+    <button class="borrar" data-editmov="${m.id}" title="Editar" aria-label="Editar movimiento">✎</button>
     <button class="borrar" data-borrar="${m.id}" title="Borrar" aria-label="Borrar movimiento">✕</button>
   </div>`;
 }
@@ -964,9 +965,12 @@ function pintarCarga() {
         <div class="campo"><label>Fecha</label><input id="f-fecha" type="date" value="${hoyISO()}" required></div>
         <div class="campo"><label>Nota (opcional)</label><input id="f-desc" type="text" maxlength="80" placeholder=""></div>
       </div>
-      ${cargaTipo === 'egreso' && !conCantidad && !cargaEdit ? `
-      <label style="display:flex;align-items:center;gap:9px;font-size:14px;cursor:pointer;color:var(--muted)">
-        <input id="f-recurrente" type="checkbox" style="width:18px;height:18px;flex:none"> Repetir todos los meses (gasto fijo)</label>` : ''}
+      ${cargaTipo === 'egreso' && !conCantidad ? (
+        (S.datos.recurrentes || []).some((x) => x.activo && x.categoria === cargaCat)
+          ? `<p class="muted s" style="margin:0">🔁 Esta categoría ya es un gasto fijo mensual (se maneja en ⚙ Ajustes → Gastos recurrentes).</p>`
+          : `<label style="display:flex;align-items:center;gap:9px;font-size:14px;cursor:pointer;color:var(--muted)">
+        <input id="f-recurrente" type="checkbox" style="width:18px;height:18px;flex:none"> ${cargaEdit ? 'Convertir en gasto fijo (se repite todos los meses)' : 'Repetir todos los meses (gasto fijo)'}</label>`
+      ) : ''}
       <button class="btn btn-primario" type="submit">${cargaEdit ? 'Guardar cambios' : `Confirmar ${cargaTipo === 'egreso' ? 'gasto' : 'ingreso'}`}</button>
     </form>` : `<p class="muted s" style="text-align:center;margin:16px 0 6px">Elegí una categoría</p>`}
   `);
@@ -1010,27 +1014,30 @@ function pintarCarga() {
       cantidad: $('#f-cantidad') ? num($('#f-cantidad').value) : null,
       monto,
     };
+    // Si marcó "repetir todos los meses", creo la definición recurrente (ya confirmada este mes)
+    const crearRecurrente = async () => {
+      if (datos.tipo !== 'egreso' || !$('#f-recurrente')?.checked) return;
+      try {
+        const rec = await insertarRecurrente({
+          categoria: datos.categoria, monto: datos.monto,
+          descripcion: datos.descripcion, ultimo_mes: mesActualKey(),
+        });
+        (S.datos.recurrentes = S.datos.recurrentes || []).push(rec);
+      } catch (e) { toast('Guardado, pero no se pudo crear el gasto fijo: ' + e.message, false); }
+    };
     try {
       if (cargaEdit) {
         await actualizarMovimiento(cargaEdit.id, datos);
         Object.assign(cargaEdit, datos);
         S.datos.movimientos.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0));
+        await crearRecurrente();
         cargaEdit = null;
         cerrarSheet(); render();
         toast('Movimiento actualizado ✔');
       } else {
         const creado = await agregarMovimiento(datos);
         S.datos.movimientos.unshift(creado);
-        // Si marcó "repetir todos los meses", creo la definición recurrente (ya confirmada este mes)
-        if (datos.tipo === 'egreso' && $('#f-recurrente')?.checked) {
-          try {
-            const rec = await insertarRecurrente({
-              categoria: datos.categoria, monto: datos.monto,
-              descripcion: datos.descripcion, ultimo_mes: mesActualKey(),
-            });
-            (S.datos.recurrentes = S.datos.recurrentes || []).push(rec);
-          } catch (e) { toast('Gasto guardado, pero no se pudo crear el recurrente: ' + e.message, false); }
-        }
+        await crearRecurrente();
         cerrarSheet(); render();
         toast(`${cargaTipo === 'egreso' ? 'Gasto' : 'Ingreso'} de ${fmtARS(monto)} registrado ✔`);
       }
@@ -1225,7 +1232,11 @@ async function guardarCats(lista, msg, volver = pintarCategorias) {
     render();  // refresca emojis / botonera en las vistas
     volver();  // y vuelve a la pantalla de origen (gestor o carga)
     toast(msg);
-  } catch (e) { toast('No se pudo guardar: ' + e.message, false); }
+  } catch (e) {
+    if (/categorias/i.test(e.message) && /column|schema/i.test(e.message)) {
+      alert('Falta actualizar la base de datos.\n\nEntrá a Supabase → SQL Editor y corré:\n\nalter table ajustes add column if not exists categorias jsonb;\n\nDespués volvé a intentar.');
+    } else toast('No se pudo guardar: ' + e.message, false);
+  }
 }
 
 // ---------------- Sheet: gestor de gastos recurrentes ----------------
