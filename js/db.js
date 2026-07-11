@@ -49,11 +49,15 @@ export async function cargarTodo() {
   ]);
   [aj, iol, cr, mov, metas].forEach((r) => lanza(r.error));
 
-  // Recurrentes: tolerante a que la tabla todavía no exista (Tanda 3 sin migrar aún)
-  let recurrentes = [];
+  // Recurrentes y patrimonio histórico: tolerantes a que la tabla todavía no exista (migración pendiente)
+  let recurrentes = [], patrimonioHist = [];
   try {
     const rec = await sb.from('recurrentes').select('*').order('created_at');
     if (!rec.error) recurrentes = rec.data || [];
+  } catch (e) { /* tabla aún no creada */ }
+  try {
+    const ph = await sb.from('patrimonio_hist').select('*').order('mes');
+    if (!ph.error) patrimonioHist = ph.data || [];
   } catch (e) { /* tabla aún no creada */ }
 
   return {
@@ -63,6 +67,7 @@ export async function cargarTodo() {
     movimientos: mov.data || [],
     metas: metas.data || [],
     recurrentes,
+    patrimonioHist,
   };
 }
 
@@ -144,6 +149,15 @@ export async function actualizarRecurrente(id, parcial) {
 
 export async function borrarRecurrente(id) {
   const { error } = await sb.from('recurrentes').delete().eq('id', id);
+  lanza(error);
+}
+
+// ---------------- Snapshot mensual de patrimonio ----------------
+export async function guardarSnapshotPatrimonio(snap) {
+  const { data: s } = await sb.auth.getSession();
+  const user_id = s.session.user.id;
+  const { error } = await sb.from('patrimonio_hist')
+    .upsert({ user_id, ...snap, updated_at: new Date().toISOString() });
   lanza(error);
 }
 

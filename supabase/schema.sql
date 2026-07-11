@@ -93,6 +93,17 @@ create table if not exists recurrentes (
   created_at timestamptz not null default now()
 );
 
+-- Snapshot mensual del patrimonio (para el gráfico de evolución)
+create table if not exists patrimonio_hist (
+  user_id uuid not null references auth.users (id) on delete cascade,
+  mes text not null,                        -- 'AAAA-MM'
+  ars numeric not null,
+  usd numeric not null,
+  ccl numeric,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, mes)
+);
+
 -- ------------------------------------------------------------
 -- user_id automático en inserts (el cliente no necesita mandarlo)
 -- ------------------------------------------------------------
@@ -119,6 +130,8 @@ drop trigger if exists trg_uid_aportes on aportes;
 create trigger trg_uid_aportes before insert on aportes for each row execute function set_user_id();
 drop trigger if exists trg_uid_recurrentes on recurrentes;
 create trigger trg_uid_recurrentes before insert on recurrentes for each row execute function set_user_id();
+drop trigger if exists trg_uid_pathist on patrimonio_hist;
+create trigger trg_uid_pathist before insert on patrimonio_hist for each row execute function set_user_id();
 
 -- ------------------------------------------------------------
 -- Row Level Security: cada usuario ve y toca SOLO sus filas
@@ -130,11 +143,12 @@ alter table movimientos enable row level security;
 alter table metas enable row level security;
 alter table aportes enable row level security;
 alter table recurrentes enable row level security;
+alter table patrimonio_hist enable row level security;
 
 do $$
 declare t text;
 begin
-  foreach t in array array['ajustes','portfolio_iol','portfolio_crypto','movimientos','metas','aportes','recurrentes'] loop
+  foreach t in array array['ajustes','portfolio_iol','portfolio_crypto','movimientos','metas','aportes','recurrentes','patrimonio_hist'] loop
     execute format('drop policy if exists "propietario_select" on %I', t);
     execute format('drop policy if exists "propietario_insert" on %I', t);
     execute format('drop policy if exists "propietario_update" on %I', t);

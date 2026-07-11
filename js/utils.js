@@ -53,14 +53,15 @@ export function donutSVG(segments, size = 132, grosor = 16) {
   const r = (size - grosor) / 2;
   const c = size / 2;
   const circ = 2 * Math.PI * r;
+  const gap = segments.filter((s) => s.valor > 0).length > 1 ? 2 : 0; // respiro entre segmentos
   let offset = 0;
   const arcs = segments.map((s) => {
     const frac = Math.max(0, s.valor) / total;
-    const dash = frac * circ;
+    const dash = Math.max(frac * circ - gap, 0.5);
     const el = `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${grosor}"
-      stroke-dasharray="${dash} ${circ - dash}" stroke-dashoffset="${-offset}"
+      stroke-dasharray="${dash} ${circ - dash}" stroke-dashoffset="${-(offset + gap / 2)}"
       transform="rotate(-90 ${c} ${c})" stroke-linecap="butt">${s.titulo ? `<title>${esc(s.titulo)}</title>` : ''}</circle>`;
-    offset += dash;
+    offset += frac * circ;
     return el;
   });
   return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="Distribución de patrimonio">${arcs.join('')}</svg>`;
@@ -95,11 +96,13 @@ export function barrasSVG(datos, w = 640, h = 180) {
 }
 
 // ------------------------------------------------------------
-// Línea SVG simple — valores: [n] (serie a graficar), objetivo: n (línea punteada de meta)
+// Línea SVG simple — valores: [n] (serie a graficar).
+// objetivo: n | null (línea punteada de meta, opcional).
+// opts.titulos: [string] — dibuja un marcador por punto con tooltip nativo.
 // ------------------------------------------------------------
-export function lineaSVG(valores, objetivo, w = 560, h = 150) {
+export function lineaSVG(valores, objetivo = null, w = 560, h = 150, opts = {}) {
   if (valores.length < 2) return '';
-  const max = Math.max(objetivo, ...valores);
+  const max = Math.max(objetivo ?? -Infinity, ...valores);
   const min = Math.min(0, ...valores);
   const padB = 14, padT = 10;
   const areaH = h - padB - padT;
@@ -110,10 +113,14 @@ export function lineaSVG(valores, objetivo, w = 560, h = 150) {
   const area = `M0 ${(padT + areaH).toFixed(1)} ` +
     valores.map((v, i) => `L${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ') +
     ` L${w} ${(padT + areaH).toFixed(1)} Z`;
-  const yObj = y(objetivo).toFixed(1);
-  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block" role="img" aria-label="Proyección de patrimonio">
-    <line x1="0" y1="${yObj}" x2="${w}" y2="${yObj}" stroke="var(--muted)" stroke-dasharray="5 4" opacity="0.55"/>
+  const puntos = (opts.titulos || []).length === valores.length
+    ? valores.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="8" fill="transparent" stroke="none"><title>${esc(opts.titulos[i])}</title></circle>
+      <circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3.5" fill="var(--accent-text)" stroke="var(--surface)" stroke-width="2" pointer-events="none"/>`).join('')
+    : '';
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;display:block" role="img" aria-label="${esc(opts.label || 'Evolución')}">
+    ${objetivo != null ? `<line x1="0" y1="${y(objetivo).toFixed(1)}" x2="${w}" y2="${y(objetivo).toFixed(1)}" stroke="var(--muted)" stroke-dasharray="5 4" opacity="0.55"/>` : ''}
     <path d="${area}" fill="var(--accent-soft)" opacity="0.55"/>
     <path d="${linea}" fill="none" stroke="var(--accent-text)" stroke-width="2.5" stroke-linejoin="round"/>
+    ${puntos}
   </svg>`;
 }

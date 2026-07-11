@@ -5,7 +5,8 @@ import { configOK, sb, sesionActual, enviarMagicLink, cerrarSesion, onAuthChange
          cargarTodo, guardarAjustes, agregarMovimiento, actualizarMovimiento, borrarMovimiento,
          actualizarPosicionIOL, actualizarPosicionCrypto, actualizarMeta, insertarMeta,
          cargarAportes, insertarAporte, borrarAporte,
-         insertarRecurrente, actualizarRecurrente, borrarRecurrente, importarSeed } from './db.js';
+         insertarRecurrente, actualizarRecurrente, borrarRecurrente,
+         guardarSnapshotPatrimonio, importarSeed } from './db.js';
 import { SEED } from './seed.js';
 import { preciosCedears, preciosCrypto, cclDelDia } from './precios.js';
 import { fmtARS, fmtUSD, fmtNum, fmtPct, signo, hoyISO, mesKey, mesActualKey,
@@ -82,7 +83,7 @@ const ICONS = {
 
 const S = {
   session: null,
-  datos: { ajustes: null, iol: [], crypto: [], movimientos: [], metas: [], recurrentes: [] },
+  datos: { ajustes: null, iol: [], crypto: [], movimientos: [], metas: [], recurrentes: [], patrimonioHist: [] },
   precios: {},        // ticker_yahoo -> { precio, cierreAnterior }
   cryptoPx: {},       // 'BTC' -> precio USD
   ccl: null,
@@ -192,8 +193,25 @@ async function refrescarPrecios(avisar = false) {
   );
   await Promise.all(tareas);
   S.preciosAl = new Date();
+  await snapshotPatrimonio();
   render();
   if (avisar) toast('Precios actualizados');
+}
+
+// Guarda (upsert) el snapshot del mes con el patrimonio valuado — silencioso.
+// Solo cuando todos los precios llegaron, para no registrar totales incompletos.
+async function snapshotPatrimonio() {
+  try {
+    const iol = calcIOL(), cr = calcCrypto();
+    const pat = calcPatrimonio(iol, cr);
+    if (!iol.completo || !cr.completo || !S.ccl || pat.ars == null) return;
+    const snap = { mes: mesActualKey(), ars: Math.round(pat.ars), usd: Math.round(pat.usd), ccl: S.ccl };
+    await guardarSnapshotPatrimonio(snap);
+    const hist = (S.datos.patrimonioHist = S.datos.patrimonioHist || []);
+    const i = hist.findIndex((h) => h.mes === snap.mes);
+    if (i >= 0) hist[i] = { ...hist[i], ...snap };
+    else { hist.push(snap); hist.sort((a, b) => (a.mes < b.mes ? -1 : 1)); }
+  } catch (e) { /* tabla aún no migrada: el gráfico simplemente no aparece */ }
 }
 
 // ============================================================
@@ -405,15 +423,22 @@ function filaPendiente(m) {
 }
 
 // ---------------- Gráficos: paleta + donut con leyenda ----------------
-const PALETA = ['#5b8def', '#34c79a', '#f5a524', '#ef5da8', '#9b7bf0', '#22b8cf',
-  '#f06548', '#8bc34a', '#ffd23f', '#6c8cff', '#e573b5', '#4dd4ac', '#c98bf0', '#ff8a5c'];
+// 8 series con orden fijo; los colores viven en CSS (variante clara/oscura validada).
+const PALETA = ['var(--serie-1)', 'var(--serie-2)', 'var(--serie-3)', 'var(--serie-4)',
+  'var(--serie-5)', 'var(--serie-6)', 'var(--serie-7)', 'var(--serie-8)'];
 
 // items: [{ label, valor }] · fmt: formateador de moneda. Devuelve donut + leyenda con % y montos.
+// Con más de 8 categorías, las menores se pliegan en "Otras" (nunca se repiten colores).
 function panelDonut(items, fmt) {
-  const segs = items.filter((x) => (x.valor || 0) > 0).sort((a, b) => b.valor - a.valor);
+  let segs = items.filter((x) => (x.valor || 0) > 0).sort((a, b) => b.valor - a.valor);
   const total = segs.reduce((a, x) => a + x.valor, 0);
   if (total <= 0) return '<div class="vacio">Sin datos para graficar.</div>';
-  const conColor = segs.map((s, i) => ({ ...s, color: PALETA[i % PALETA.length], pct: (s.valor / total) * 100 }));
+  if (segs.length > PALETA.length) {
+    const resto = segs.slice(PALETA.length - 1);
+    segs = [...segs.slice(0, PALETA.length - 1),
+      { label: `Otras (${resto.length})`, valor: resto.reduce((a, x) => a + x.valor, 0) }];
+  }
+  const conColor = segs.map((s, i) => ({ ...s, color: PALETA[i], pct: (s.valor / total) * 100 }));
   return `<div class="patrimonio-cuerpo">
     ${donutSVG(conColor.map((s) => ({ valor: s.valor, color: s.color, label: s.label,
       titulo: `${s.label} · ${fmt(s.valor)} · ${s.pct.toFixed(1)}%` })))}
@@ -428,7 +453,7 @@ function panelDonut(items, fmt) {
 // Mes seleccionado en el gráfico de gastos por categoría (Historial)
 let mesGastoSel = mesActualKey();
 // Filtros de la tabla de movimientos (Historial)
-let filtroMov = { mes: '', tipo: '', cat: '', limite: 50 };
+let filtroMov = { mes: '', tipo: '', cat: '', q: '', limite: 50 };
 
 // ---------------- Vista: Historial ----------------
 function vHistorial() {
@@ -503,10 +528,12 @@ function coincideTipo(m, t) {
 
 function movsFiltrados() {
   const f = filtroMov;
+  const q = f.q.trim().toLowerCase();
   return S.datos.movimientos.filter((m) =>
     (!f.mes || mesKey(m.fecha) === f.mes) &&
     (!f.tipo || coincideTipo(m, f.tipo)) &&
-    (!f.cat || m.categoria === f.cat));
+    (!f.cat || m.categoria === f.cat) &&
+    (!q || `${m.categoria} ${m.descripcion || ''}`.toLowerCase().includes(q)));
 }
 
 function cardMovimientos() {
@@ -521,6 +548,8 @@ function cardMovimientos() {
   return `<div class="card">
     <h2>Todos los movimientos <span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${movs.length}</span></h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">
+      <input id="f-mov-q" type="search" placeholder="🔎 Buscar por categoría o nota…" value="${esc(filtroMov.q)}"
+        style="${SELECT_CSS};flex-basis:100%" autocomplete="off">
       <select id="f-mov-mes" style="${SELECT_CSS};flex:1;min-width:130px">
         ${opt('', filtroMov.mes, 'Todos los meses')}${mesesOpt.map((k) => opt(k, filtroMov.mes, nombreMes(k, true))).join('')}
       </select>
@@ -554,6 +583,27 @@ function cardMovimientos() {
   </div>`;
 }
 
+// Evolución del patrimonio — un punto por mes (snapshot automático al refrescar precios)
+function cardEvolucion() {
+  const hist = S.datos.patrimonioHist || [];
+  if (hist.length < 2) return '';
+  const valores = hist.map((h) => h.ars);
+  const titulos = hist.map((h) => `${nombreMes(h.mes, true)} · ${fmtARS(h.ars)} (${fmtUSD(h.usd)})`);
+  const prim = hist[0], ult = hist[hist.length - 1];
+  const dif = ult.ars - prim.ars;
+  const difPct = prim.ars > 0 ? (dif / prim.ars) * 100 : null;
+  return `<div class="card">
+    <h2>Evolución del patrimonio</h2>
+    ${lineaSVG(valores, null, 560, 150, { titulos, label: 'Evolución del patrimonio mes a mes' })}
+    <div class="chart-leyenda" style="justify-content:space-between;flex-wrap:wrap">
+      <span class="num">${esc(nombreMes(prim.mes))}: <b>${fmtARS(prim.ars)}</b></span>
+      <span class="num ${signo(dif)}"><b>${dif >= 0 ? '+' : ''}${fmtARS(dif)}</b> (${fmtPct(difPct)})</span>
+      <span class="num">${esc(nombreMes(ult.mes))}: <b>${fmtARS(ult.ars)}</b></span>
+    </div>
+    <p class="muted s" style="margin:8px 0 0">Un punto por mes: queda la última valuación de cada mes (se guarda sola al actualizar precios).</p>
+  </div>`;
+}
+
 // ---------------- Vista: Portfolio ----------------
 function vPortfolio() {
   const iol = calcIOL(), cr = calcCrypto();
@@ -575,6 +625,8 @@ function vPortfolio() {
       </div>
       ${!iol.completo || !cr.completo ? `<p class="aviso info s" style="margin:12px 0 0">Algunos precios todavía no llegaron — los activos sin precio se muestran con “—” y no suman al total. Probá ↻ Precios.</p>` : ''}
     </div>
+
+    ${cardEvolucion()}
 
     <div class="card solo-mobile">
       <h2>Posiciones</h2>
@@ -804,6 +856,16 @@ function postRender(vista) {
 
   const inf = vista.querySelector('#btn-informe');
   if (inf) inf.onclick = () => abrirInforme();
+
+  const fQ = vista.querySelector('#f-mov-q');
+  if (fQ) fQ.oninput = () => {
+    clearTimeout(fQ._deb);
+    fQ._deb = setTimeout(() => {
+      filtroMov.q = fQ.value; filtroMov.limite = 50; render();
+      const n = document.querySelector('#f-mov-q'); // recupero el foco tras redibujar
+      if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); }
+    }, 250);
+  };
 
   const fMes = vista.querySelector('#f-mov-mes');
   if (fMes) fMes.onchange = () => { filtroMov.mes = fMes.value; filtroMov.limite = 50; render(); };
@@ -1720,6 +1782,12 @@ async function boot() {
   }
   render();
   refrescarPrecios();
+  // Acceso directo del ícono de la app: /?carga=gasto | /?carga=ingreso
+  const accion = new URLSearchParams(location.search).get('carga');
+  if (accion === 'gasto' || accion === 'ingreso') {
+    history.replaceState(null, '', location.pathname);
+    abrirCarga(accion === 'gasto' ? 'egreso' : 'ingreso');
+  }
 }
 
 async function init() {
