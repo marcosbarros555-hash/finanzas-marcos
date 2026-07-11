@@ -464,8 +464,11 @@ function vHistorial() {
 
     <div class="card">
       <h2>Exportar</h2>
-      <p class="muted s" style="margin:0 0 12px">Descargá tus movimientos en un CSV (se abre en Excel o Google Sheets), con opción de filtrar por fechas.</p>
-      <button class="btn btn-fantasma" id="btn-export">⬇ Exportar a CSV</button>
+      <p class="muted s" style="margin:0 0 12px">El informe resume patrimonio, flujo y metas en texto listo para pegar en tu proyecto de Claude. El CSV exporta los movimientos para Excel o Sheets.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-fantasma" id="btn-informe">📋 Informe de ahorros</button>
+        <button class="btn btn-fantasma" id="btn-export">⬇ Exportar a CSV</button>
+      </div>
     </div>
   `;
 }
@@ -799,6 +802,9 @@ function postRender(vista) {
   const exp = vista.querySelector('#btn-export');
   if (exp) exp.onclick = () => abrirExport();
 
+  const inf = vista.querySelector('#btn-informe');
+  if (inf) inf.onclick = () => abrirInforme();
+
   const fMes = vista.querySelector('#f-mov-mes');
   if (fMes) fMes.onchange = () => { filtroMov.mes = fMes.value; filtroMov.limite = 50; render(); };
   const fTipo = vista.querySelector('#f-mov-tipo');
@@ -1121,6 +1127,129 @@ function descargarCSV(movs) {
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
   toast('CSV descargado ✔');
+}
+
+// ---------------- Informe de ahorros (texto copiable p/ proyecto de Claude) ----------------
+function generarInforme() {
+  const iol = calcIOL(), cr = calcCrypto();
+  const pat = calcPatrimonio(iol, cr);
+  const mesAct = mesActualKey();
+  const r = resumenMes(mesAct);
+  const gastosProm = promedio3m('gastos');
+  const excedenteProm = promedio3m('excedente');
+  const hoy = new Date().toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
+  const L = [];
+
+  L.push(`# Informe de finanzas — ${hoy}`);
+  L.push('');
+  L.push('## Patrimonio');
+  L.push(`- **Total: ${fmtARS(pat.ars)}** (${fmtUSD(pat.usd)}) — CCL ${S.ccl ? fmtARS(S.ccl) : 'sin dato'}${S.cclFuente ? ` (${S.cclFuente})` : ''}`);
+  L.push(`- CEDEARs (IOL): ${fmtARS(iol.total)} — PnL ${fmtARS(iol.pnl)} (${fmtPct(iol.pnlPct)})`);
+  L.push(`- Cripto (Binance): ${fmtUSD(cr.total, true)} — PnL ${fmtUSD(cr.pnl, true)} (${fmtPct(cr.pnlPct)})`);
+  L.push(`- Efectivo: ${fmtUSD(pat.efectivo)}`);
+  if (!iol.completo || !cr.completo) L.push('- ⚠ Algunos precios no cargaron; los activos sin precio no suman al total.');
+  L.push('');
+
+  if (iol.filas.length) {
+    L.push('### Posiciones IOL (ARS)');
+    L.push('| Activo | Cantidad | PPC | Precio actual | Valorizado | PnL |');
+    L.push('|---|---|---|---|---|---|');
+    iol.filas.forEach((p) => L.push(
+      `| ${p.simbolo}${p.nombre ? ` (${p.nombre})` : ''} | ${fmtNum(p.cantidad)} | ${fmtARS(p.ppc, true)} | ${fmtARS(p.px, true)} | ${fmtARS(p.valorizado)} | ${fmtARS(p.pnl)} (${fmtPct(p.pnlPct)}) |`));
+    L.push('');
+  }
+  if (cr.filas.length) {
+    L.push('### Cripto (USD)');
+    L.push('| Activo | Cantidad | Precio compra | Precio actual | Valorizado | PnL |');
+    L.push('|---|---|---|---|---|---|');
+    cr.filas.forEach((p) => L.push(
+      `| ${p.simbolo}${p.nombre ? ` (${p.nombre})` : ''} | ${fmtNum(p.cantidad)} | ${fmtUSD(p.precio_compra_usd, true)} | ${fmtUSD(p.px, true)} | ${fmtUSD(p.valorizado, true)} | ${fmtUSD(p.pnl, true)} (${fmtPct(p.pnlPct)}) |`));
+    L.push('');
+  }
+
+  L.push(`## Flujo de ${nombreMes(mesAct, true).toLowerCase()}`);
+  L.push(`- Entró: ${fmtARS(r.ingresos)} · Gastos: ${fmtARS(r.gastos)} · Invertido: ${fmtARS(r.invertido)} · Excedente: ${fmtARS(r.excedente)}`);
+  L.push(`- Producción: ${fmtNum(r.sesionesCant)} sesiones (${fmtARS(r.sesionesMonto)}) · ${fmtNum(r.domiCant)} domicilios hechos (${fmtARS(r.domiMonto)})`);
+  const pendientes = S.datos.movimientos.filter((m) => esDomicilioHecho(m.categoria));
+  if (pendientes.length) L.push(`- Pendiente de cobro (domicilios): ${fmtARS(pendientes.reduce((a, m) => a + m.monto, 0))}`);
+  L.push(`- Promedios últimos meses: gastos ${fmtARS(gastosProm)}/mes · excedente ${fmtARS(excedenteProm)}/mes`);
+  L.push('');
+
+  const gastosMes = S.datos.movimientos.filter((m) => mesKey(m.fecha) === mesAct && m.tipo === 'egreso' && m.categoria !== 'Inversión');
+  if (gastosMes.length) {
+    const porCat = {};
+    gastosMes.forEach((m) => { porCat[m.categoria] = (porCat[m.categoria] || 0) + m.monto; });
+    const totalG = gastosMes.reduce((a, m) => a + m.monto, 0);
+    L.push(`## Gastos de ${nombreMes(mesAct, true).toLowerCase()} por categoría`);
+    Object.entries(porCat).sort((a, b) => b[1] - a[1])
+      .forEach(([c, v]) => L.push(`- ${c}: ${fmtARS(v)} (${((v / totalG) * 100).toFixed(0)}%)`));
+    L.push('');
+  }
+
+  const meses = ultimosMeses(7).map((k) => ({ k, ...resumenMes(k) })).filter((d) => d.ingresos || d.gastos || d.invertido);
+  if (meses.length) {
+    L.push('## Últimos meses');
+    L.push('| Mes | Ingresos | Gastos | Invertido | Excedente |');
+    L.push('|---|---|---|---|---|');
+    meses.forEach((d) => L.push(`| ${nombreMes(d.k, true)} | ${fmtARS(d.ingresos)} | ${fmtARS(d.gastos)} | ${fmtARS(d.invertido)} | ${fmtARS(d.excedente)} |`));
+    L.push('');
+  }
+
+  if (S.datos.metas.length) {
+    L.push('## Metas de ahorro');
+    S.datos.metas.forEach((m) => {
+      let objetivo = m.objetivo, acumulado = m.acumulado, extra = '';
+      if (m.clave === 'emergencia' && gastosProm > 0) { objetivo = gastosProm * 3; extra = ' — objetivo auto: 3× gastos prom.'; }
+      if (m.clave === 'independencia') { acumulado = pat.usd ?? m.acumulado; extra = ' — acumulado = patrimonio actual'; }
+      const fmt = m.moneda === 'USD' ? fmtUSD : fmtARS;
+      const pct = objetivo > 0 ? Math.min(100, (acumulado / objetivo) * 100).toFixed(0) : '0';
+      L.push(`- ${m.nombre}: ${fmt(acumulado)} / ${fmt(objetivo)} (${pct}%)${extra}`);
+    });
+    L.push('');
+  }
+
+  const recs = (S.datos.recurrentes || []).filter((x) => x.activo);
+  if (recs.length) {
+    L.push('## Gastos fijos mensuales');
+    recs.forEach((x) => L.push(`- ${x.categoria}: ${fmtARS(x.monto)}${x.descripcion ? ` (${x.descripcion})` : ''}`));
+    L.push('');
+  }
+
+  L.push(`_Generado por Finanzas Marcos el ${hoyISO()}. Montos ARS salvo indicación; conversiones al CCL del día._`);
+  return L.join('\n');
+}
+
+function abrirInforme() {
+  const texto = generarInforme();
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Informe de ahorros</h2>
+    <p class="muted s" style="margin:0 0 12px">Copialo y pegalo en tu proyecto de Claude para actualizar tus datos. Usa los últimos precios cargados (↻ Precios si querés refrescar antes).</p>
+    <textarea id="inf-texto" readonly style="width:100%;height:44vh;padding:12px;border-radius:12px;border:1px solid var(--border);background:var(--bg);color:inherit;font:12px/1.5 ui-monospace,monospace;resize:vertical;white-space:pre"></textarea>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-primario" id="inf-copiar" style="flex:1">📋 Copiar todo</button>
+      <button class="btn btn-fantasma" id="inf-descargar">⬇ .md</button>
+    </div>
+  `);
+  $('#inf-texto').value = texto;
+  $('#inf-copiar').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(texto);
+      toast('Informe copiado ✔ — pegalo en Claude');
+    } catch (e) {
+      $('#inf-texto').select();
+      document.execCommand('copy');
+      toast('Informe copiado ✔');
+    }
+  };
+  $('#inf-descargar').onclick = () => {
+    const blob = new Blob([texto], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `informe-finanzas-${hoyISO()}.md`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('Informe descargado ✔');
+  };
 }
 
 // ---------------- Sheet: categorías ----------------
