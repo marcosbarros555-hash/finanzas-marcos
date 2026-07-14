@@ -624,6 +624,7 @@ function vPortfolio() {
           <div class="s muted">${esc(S.cclFuente || '')}</div></div>
       </div>
       ${!iol.completo || !cr.completo ? `<p class="aviso info s" style="margin:12px 0 0">Algunos precios todavía no llegaron — los activos sin precio se muestran con “—” y no suman al total. Probá ↻ Precios.</p>` : ''}
+      <button class="btn btn-chico btn-fantasma" id="btn-inf-inv" style="margin-top:12px">📋 Informe de inversiones</button>
     </div>
 
     ${cardEvolucion()}
@@ -857,6 +858,9 @@ function postRender(vista) {
   const inf = vista.querySelector('#btn-informe');
   if (inf) inf.onclick = () => abrirInforme();
 
+  const infInv = vista.querySelector('#btn-inf-inv');
+  if (infInv) infInv.onclick = () => abrirInformeInversiones();
+
   const fQ = vista.querySelector('#f-mov-q');
   if (fQ) fQ.oninput = () => {
     clearTimeout(fQ._deb);
@@ -1003,8 +1007,10 @@ function pintarCarga() {
   const aj = S.datos.ajustes || {};
   const esSesiones = cargaCat === 'Sesiones (producción)';
   const esDomicilios = cargaCat === 'Domicilios cobrados' || cargaCat === 'Domicilios hechos';
-  const conCantidad = esSesiones || esDomicilios;
-  const unidad = esSesiones ? (aj.valor_sesion || 0) : (aj.valor_domicilio || 35000);
+  const catDef = cats.find((x) => x.c === cargaCat);
+  const unitCat = catDef && catDef.u > 0 ? catDef.u : null; // categoría con valor unitario (ej: colectivo)
+  const conCantidad = esSesiones || esDomicilios || !!unitCat;
+  const unidad = esSesiones ? (aj.valor_sesion || 0) : esDomicilios ? (aj.valor_domicilio || 35000) : (unitCat || 0);
 
   abrirSheet(`
     ${cargaEdit ? `<h2 style="margin:0 0 12px;font-size:18px">Editar movimiento</h2>` : ''}
@@ -1026,6 +1032,9 @@ function pintarCarga() {
           <input id="f-cantidad" type="number" inputmode="numeric" step="any" min="0" value="1" required></div>
         <div class="campo"><label>Valor unitario</label>
           <input id="f-unidad" type="number" inputmode="decimal" step="any" min="0" value="${unidad}" ${esSesiones && !aj.valor_sesion ? 'placeholder="definí valor sesión en ⚙"' : ''}></div>
+      </div>
+      <div style="display:flex;gap:8px">
+        ${[1, 2, 3, 4].map((n) => `<button type="button" class="btn btn-chico btn-fantasma" data-mult="${n}" style="flex:1">×${n}</button>`).join('')}
       </div>` : ''}
       <div class="campo"><label>Monto total (ARS)</label>
         <input id="f-monto" class="input-monto" type="number" inputmode="decimal" step="any" min="0" placeholder="0" required ${conCantidad ? `value="${unidad || ''}"` : ''}></div>
@@ -1055,6 +1064,10 @@ function pintarCarga() {
     };
     $('#f-cantidad').oninput = recalc;
     $('#f-unidad').oninput = recalc;
+    document.querySelectorAll('[data-mult]').forEach((b) => (b.onclick = () => {
+      $('#f-cantidad').value = b.dataset.mult;
+      recalc();
+    }));
     recalc();
   }
 
@@ -1281,11 +1294,11 @@ function generarInforme() {
   return L.join('\n');
 }
 
-function abrirInforme() {
-  const texto = generarInforme();
+// Sheet genérico para informes copiables (ahorros, inversiones, …)
+function sheetInforme(titulo, desc, texto, archivo) {
   abrirSheet(`
-    <h2 style="margin:0 0 4px;font-size:18px">Informe de ahorros</h2>
-    <p class="muted s" style="margin:0 0 12px">Copialo y pegalo en tu proyecto de Claude para actualizar tus datos. Usa los últimos precios cargados (↻ Precios si querés refrescar antes).</p>
+    <h2 style="margin:0 0 4px;font-size:18px">${esc(titulo)}</h2>
+    <p class="muted s" style="margin:0 0 12px">${esc(desc)}</p>
     <textarea id="inf-texto" readonly style="width:100%;height:44vh;padding:12px;border-radius:12px;border:1px solid var(--border);background:var(--bg);color:inherit;font:12px/1.5 ui-monospace,monospace;resize:vertical;white-space:pre"></textarea>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn btn-primario" id="inf-copiar" style="flex:1">📋 Copiar todo</button>
@@ -1307,11 +1320,95 @@ function abrirInforme() {
     const blob = new Blob([texto], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `informe-finanzas-${hoyISO()}.md`;
+    a.href = url; a.download = archivo;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     toast('Informe descargado ✔');
   };
+}
+
+function abrirInforme() {
+  sheetInforme('Informe de ahorros',
+    'Copialo y pegalo en tu proyecto de Claude para actualizar tus datos. Usa los últimos precios cargados (↻ Precios si querés refrescar antes).',
+    generarInforme(), `informe-finanzas-${hoyISO()}.md`);
+}
+
+// ---------------- Informe de balance de inversiones (p/ chat de consultoría) ----------------
+function generarInformeInversiones() {
+  const iol = calcIOL(), cr = calcCrypto();
+  const pat = calcPatrimonio(iol, cr);
+  const hoy = new Date().toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
+  const al = S.preciosAl ? S.preciosAl.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : null;
+  const L = [];
+
+  L.push(`# Balance de inversiones — ${hoy}`);
+  L.push('');
+  L.push(`Precios${al ? ` de las ${al}` : ' sin refrescar'} · CCL ${S.ccl ? fmtARS(S.ccl) : 'sin dato'}${S.cclFuente ? ` (${S.cclFuente})` : ''}`);
+  if (!iol.completo || !cr.completo) L.push('⚠ Faltan precios de algunos activos; no suman a los totales.');
+  L.push('');
+
+  L.push('## Composición del patrimonio');
+  L.push(`- **Total: ${fmtARS(pat.ars)} (${fmtUSD(pat.usd)})**`);
+  if (pat.ars > 0 && S.ccl) {
+    const crArs = cr.total * S.ccl, efArs = pat.efectivo * S.ccl;
+    L.push(`- CEDEARs (IOL): ${fmtARS(iol.total)} — ${((iol.total / pat.ars) * 100).toFixed(1)}%`);
+    L.push(`- Cripto (Binance): ${fmtUSD(cr.total, true)} ≈ ${fmtARS(crArs)} — ${((crArs / pat.ars) * 100).toFixed(1)}%`);
+    L.push(`- Efectivo: ${fmtUSD(pat.efectivo)} ≈ ${fmtARS(efArs)} — ${((efArs / pat.ars) * 100).toFixed(1)}%`);
+  }
+  L.push('');
+
+  if (iol.filas.length) {
+    L.push('## Cartera IOL — CEDEARs / FCI (ARS)');
+    L.push('| Activo | Cantidad | PPC | Precio actual | Var. día | Valorizado | PnL | % cartera |');
+    L.push('|---|---|---|---|---|---|---|---|');
+    iol.filas.forEach((p) => {
+      const prev = p.ticker_yahoo ? (S.precios[p.ticker_yahoo]?.cierreAnterior ?? null) : null;
+      const varDia = prev && p.px != null ? ((p.px - prev) / prev) * 100 : null;
+      const peso = iol.total > 0 && p.valorizado != null ? `${((p.valorizado / iol.total) * 100).toFixed(1)}%` : '—';
+      L.push(`| ${p.simbolo}${p.nombre ? ` (${p.nombre})` : ''} | ${fmtNum(p.cantidad)} | ${fmtARS(p.ppc, true)} | ${fmtARS(p.px, true)} | ${fmtPct(varDia)} | ${fmtARS(p.valorizado)} | ${fmtARS(p.pnl)} (${fmtPct(p.pnlPct)}) | ${peso} |`);
+    });
+    L.push(`| **Total** | | | | | **${fmtARS(iol.total)}** | **${fmtARS(iol.pnl)} (${fmtPct(iol.pnlPct)})** | 100% |`);
+    L.push(`- Costo total de la cartera IOL: ${fmtARS(iol.costo)}`);
+    L.push('');
+  }
+
+  if (cr.filas.length) {
+    L.push('## Cartera Binance — Cripto (USD)');
+    L.push('| Activo | Cantidad | Precio compra | Precio actual | Valorizado | PnL | % cartera |');
+    L.push('|---|---|---|---|---|---|---|');
+    cr.filas.forEach((p) => {
+      const peso = cr.total > 0 && p.valorizado != null ? `${((p.valorizado / cr.total) * 100).toFixed(1)}%` : '—';
+      L.push(`| ${p.simbolo}${p.nombre ? ` (${p.nombre})` : ''} | ${fmtNum(p.cantidad)} | ${fmtUSD(p.precio_compra_usd, true)} | ${fmtUSD(p.px, true)} | ${fmtUSD(p.valorizado, true)} | ${fmtUSD(p.pnl, true)} (${fmtPct(p.pnlPct)}) | ${peso} |`);
+    });
+    L.push(`| **Total** | | | | **${fmtUSD(cr.total, true)}** | **${fmtUSD(cr.pnl, true)} (${fmtPct(cr.pnlPct)})** | 100% |`);
+    L.push(`- Costo total de la cartera cripto: ${fmtUSD(cr.costo, true)}`);
+    L.push('');
+  }
+
+  const hist = S.datos.patrimonioHist || [];
+  if (hist.length) {
+    L.push('## Evolución del patrimonio (snapshot mensual)');
+    L.push('| Mes | ARS | USD | CCL |');
+    L.push('|---|---|---|---|');
+    hist.forEach((h) => L.push(`| ${nombreMes(h.mes, true)} | ${fmtARS(h.ars)} | ${fmtUSD(h.usd)} | ${h.ccl ? fmtARS(h.ccl) : '—'} |`));
+    L.push('');
+  }
+
+  const aportes = ultimosMeses(6).map((k) => ({ k, invertido: resumenMes(k).invertido })).filter((d) => d.invertido > 0);
+  if (aportes.length) {
+    L.push('## Aportes a inversión por mes (flujo nuevo)');
+    aportes.forEach((d) => L.push(`- ${nombreMes(d.k, true)}: ${fmtARS(d.invertido)}`));
+    L.push('');
+  }
+
+  L.push(`_Generado por la app Finanzas el ${hoyISO()}. PPC y precios de CEDEARs en ARS; cripto en USD; conversiones al CCL indicado. PnL = no realizado, contra precio promedio de compra._`);
+  return L.join('\n');
+}
+
+function abrirInformeInversiones() {
+  sheetInforme('Balance de inversiones',
+    'Específico de carteras: posiciones, pesos, PnL y evolución. Pensado para pegar en tu chat de consultoría de inversiones. Refrescá precios (↻) antes de generarlo.',
+    generarInformeInversiones(), `balance-inversiones-${hoyISO()}.md`);
 }
 
 // ---------------- Sheet: categorías ----------------
@@ -1324,7 +1421,7 @@ function abrirCategorias() { pintarCategorias(); }
 function filaCat(c) {
   return `<div class="mov">
     <div class="icono">${c.e || '•'}</div>
-    <div class="cuerpo"><div class="cat">${esc(c.c)}</div><div class="det">${esc(c.grupo || 'Sin rubro')}</div></div>
+    <div class="cuerpo"><div class="cat">${esc(c.c)}</div><div class="det">${esc(c.grupo || 'Sin rubro')}${c.u ? ` · ${fmtARS(c.u)}/u` : ''}</div></div>
     <button class="btn btn-chico btn-fantasma" data-cat-edit="${esc(c.c)}">Editar</button>
     <button class="borrar" data-cat-del="${esc(c.c)}" title="Borrar" aria-label="Borrar categoría">✕</button>
   </div>`;
@@ -1385,6 +1482,8 @@ function abrirFormCat(nombre, volver = pintarCategorias, tipoInicial = catSeg) {
       <div class="campo"><label>Rubro (grupo grande)</label>
         <input id="cat-grupo" type="text" maxlength="30" list="rubros-list" value="${cat ? esc(cat.grupo || '') : ''}" placeholder="Ej: Salud">
         <datalist id="rubros-list">${rubros.map((g) => `<option value="${esc(g)}"></option>`).join('')}</datalist></div>
+      <div class="campo"><label>Valor unitario ARS (opcional)</label>
+        <input id="cat-unitario" type="number" inputmode="decimal" step="any" min="0" value="${cat && cat.u ? cat.u : ''}" placeholder="ej: 1720 — habilita ×1 ×2 ×3 al cargar"></div>
       <button class="btn btn-primario" type="submit">${editar ? 'Guardar cambios' : 'Crear categoría'}</button>
       <button type="button" class="btn btn-fantasma" id="cat-volver" style="justify-self:start">← Volver</button>
     </form>
@@ -1399,6 +1498,8 @@ function abrirFormCat(nombre, volver = pintarCategorias, tipoInicial = catSeg) {
       tipo: $('#cat-tipo').value,
       grupo: $('#cat-grupo').value.trim(),
     };
+    const unitario = num($('#cat-unitario').value);
+    if (unitario > 0) nuevo.u = unitario;
     if (!nuevo.c) return toast('Poné un nombre', false);
     const lista = catsUsuario().slice();
     const choca = [...CAT_FIJAS, ...lista].some(
