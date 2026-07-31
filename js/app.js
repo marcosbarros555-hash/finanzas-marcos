@@ -4,6 +4,7 @@
 import { configOK, sb, sesionActual, enviarMagicLink, cerrarSesion, onAuthChange,
          cargarTodo, guardarAjustes, agregarMovimiento, actualizarMovimiento, borrarMovimiento,
          actualizarPosicionIOL, actualizarPosicionCrypto, actualizarMeta, insertarMeta,
+         insertarPosicionRF, actualizarPosicionRF, borrarPosicionRF,
          cargarAportes, insertarAporte, borrarAporte,
          insertarRecurrente, actualizarRecurrente, borrarRecurrente,
          guardarSnapshotPatrimonio, importarSeed } from './db.js';
@@ -83,7 +84,7 @@ const ICONS = {
 
 const S = {
   session: null,
-  datos: { ajustes: null, iol: [], crypto: [], movimientos: [], metas: [], recurrentes: [], patrimonioHist: [] },
+  datos: { ajustes: null, iol: [], crypto: [], rf: [], movimientos: [], metas: [], recurrentes: [], patrimonioHist: [] },
   precios: {},        // ticker_yahoo -> { precio, cierreAnterior }
   cryptoPx: {},       // 'BTC' -> precio USD
   ccl: null,
@@ -135,12 +136,51 @@ function calcCrypto() {
   return { filas, total: val, costo, pnl: val - costo, pnlPct: costo > 0 ? ((val - costo) / costo) * 100 : null, completo };
 }
 
-function calcPatrimonio(iol, crypto) {
-  const efectivo = S.datos.ajustes?.efectivo_usd ?? 0;
-  if (!S.ccl) return { ars: null, usd: null, efectivo };
-  const ars = iol.total + crypto.total * S.ccl + efectivo * S.ccl;
-  return { ars, usd: ars / S.ccl, efectivo };
+// Renta fija (ONs): sin cotización en vivo — el valorizado se carga a mano (mark-to-market manual).
+function calcRF() {
+  let val = 0, costo = 0;
+  const filas = S.datos.rf.map((p) => {
+    const dias = p.vencimiento ? Math.ceil((new Date(p.vencimiento) - new Date()) / 86400000) : null;
+    val += p.valorizado_ars || 0;
+    costo += p.costo_ars || 0;
+    return { ...p, dias,
+      pnl: (p.valorizado_ars || 0) - (p.costo_ars || 0),
+      pnlPct: p.costo_ars > 0 ? (((p.valorizado_ars || 0) - p.costo_ars) / p.costo_ars) * 100 : null };
+  });
+  return { filas, total: val, costo, pnl: val - costo, pnlPct: costo > 0 ? ((val - costo) / costo) * 100 : null, completo: true };
 }
+
+function calcPatrimonio(iol, crypto, rf) {
+  const efectivoUSD = S.datos.ajustes?.efectivo_usd ?? 0;
+  const efectivoARS = S.datos.ajustes?.efectivo_ars ?? 0;
+  const rfTotal = rf ? rf.total : 0;
+  if (!S.ccl) return { ars: null, usd: null, efectivo: efectivoUSD, efectivoARS };
+  const ars = iol.total + crypto.total * S.ccl + efectivoUSD * S.ccl + efectivoARS + rfTotal;
+  return { ars, usd: ars / S.ccl, efectivo: efectivoUSD, efectivoARS };
+}
+
+// Los 4 pilares (Liquidez / Renta Fija / Renta Variable / Cripto) vs. el objetivo de asignación.
+function calcPilares(iol, crypto, rf, pat) {
+  const aj = S.datos.ajustes || {};
+  if (!S.ccl || pat.ars == null || pat.ars <= 0) return null;
+  const valores = {
+    liquidez: pat.efectivo * S.ccl + pat.efectivoARS,
+    renta_fija: rf.total,
+    renta_variable: iol.total,
+    cripto: crypto.total * S.ccl,
+  };
+  const targets = {
+    liquidez: aj.target_liquidez ?? 15,
+    renta_fija: aj.target_renta_fija ?? 30,
+    renta_variable: aj.target_renta_variable ?? 35,
+    cripto: aj.target_cripto ?? 20,
+  };
+  return ['liquidez', 'renta_fija', 'renta_variable', 'cripto'].map((k) => {
+    const actualPct = (valores[k] / pat.ars) * 100;
+    return { clave: k, valor: valores[k], actualPct, targetPct: targets[k], desvio: actualPct - targets[k] };
+  });
+}
+const PILAR_LABEL = { liquidez: 'Liquidez', renta_fija: 'Renta Fija', renta_variable: 'Renta Variable', cripto: 'Cripto' };
 
 // Resumen de un mes: { ingresos, gastos, invertido, sesionesMonto, sesionesCant, cobrado, excedente }
 function resumenMes(key) {
@@ -202,8 +242,8 @@ async function refrescarPrecios(avisar = false) {
 // Solo cuando todos los precios llegaron, para no registrar totales incompletos.
 async function snapshotPatrimonio() {
   try {
-    const iol = calcIOL(), cr = calcCrypto();
-    const pat = calcPatrimonio(iol, cr);
+    const iol = calcIOL(), cr = calcCrypto(), rf = calcRF();
+    const pat = calcPatrimonio(iol, cr, rf);
     if (!iol.completo || !cr.completo || !S.ccl || pat.ars == null) return;
     const snap = { mes: mesActualKey(), ars: Math.round(pat.ars), usd: Math.round(pat.usd), ccl: S.ccl };
     await guardarSnapshotPatrimonio(snap);
@@ -293,8 +333,8 @@ function alertasActivas() {
 // ---------------- Vista: Inicio ----------------
 function vInicio() {
   const alertas = alertasActivas();
-  const iol = calcIOL(), cr = calcCrypto();
-  const pat = calcPatrimonio(iol, cr);
+  const iol = calcIOL(), cr = calcCrypto(), rf = calcRF();
+  const pat = calcPatrimonio(iol, cr, rf);
   const r = resumenMes(mesActualKey());
   const totalFlujo = r.ingresos + r.gastos + r.invertido;
   const pctIn = totalFlujo > 0 ? (r.ingresos / totalFlujo) * 100 : 0;
@@ -604,11 +644,37 @@ function cardEvolucion() {
   </div>`;
 }
 
+// Asignación por clase de activo — 4 pilares (Liquidez / Renta Fija / Renta Variable / Cripto) vs. objetivo
+function cardPilares(pilares) {
+  if (!pilares) return `<div class="card"><h2>Asignación por clase de activo</h2>
+    <div class="vacio">Necesito el CCL para calcular los pilares — probá ↻ Precios.</div></div>`;
+  const clsDesvio = (d) => (Math.abs(d) <= 3 ? 'pos' : 'neg');
+  return `<div class="card">
+    <h2>Asignación por clase de activo</h2>
+    <div class="tabla-scroll"><table>
+      <thead><tr><th>Pilar</th><th>Valor</th><th>Actual</th><th>Objetivo</th><th>Desvío</th></tr></thead>
+      <tbody>
+        ${pilares.map((p) => `<tr>
+          <td style="text-align:left"><b>${esc(PILAR_LABEL[p.clave])}</b></td>
+          <td class="num">${fmtARS(p.valor)}</td>
+          <td class="num">${p.actualPct.toFixed(1)}%</td>
+          <td class="num muted">${p.targetPct.toFixed(0)}%</td>
+          <td class="num ${clsDesvio(p.desvio)}">${p.desvio >= 0 ? '+' : ''}${p.desvio.toFixed(1)} pp</td>
+        </tr>`).join('')}
+      </tbody>
+    </table></div>
+    <p class="muted s" style="margin:10px 0 0">Verde = a ±3 puntos del objetivo. Rojo = conviene rebalancear con el próximo aporte. Editá los objetivos en ⚙ Ajustes.</p>
+  </div>`;
+}
+
 // ---------------- Vista: Portfolio ----------------
 function vPortfolio() {
-  const iol = calcIOL(), cr = calcCrypto();
-  const pat = calcPatrimonio(iol, cr);
+  const iol = calcIOL(), cr = calcCrypto(), rf = calcRF();
+  const pat = calcPatrimonio(iol, cr, rf);
+  const pilares = calcPilares(iol, cr, rf, pat);
   const al = S.preciosAl ? S.preciosAl.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : null;
+  const SUB_IOL = { cedear: 'CEDEAR', fci: 'FCI' };
+  const SUB_CR = { cripto_core: 'Core', cripto_satelite: 'Satélite' };
 
   return `
     <div class="card">
@@ -616,9 +682,11 @@ function vPortfolio() {
       <div class="fila-metricas">
         <div class="mini-metric"><div class="lbl">IOL · CEDEARs</div><div class="val num">${fmtARS(iol.total)}</div>
           <div class="s num ${signo(iol.pnl)}">${fmtARS(iol.pnl)} (${fmtPct(iol.pnlPct)})</div></div>
+        <div class="mini-metric"><div class="lbl">Renta fija (ONs)</div><div class="val num">${fmtARS(rf.total)}</div>
+          <div class="s num ${signo(rf.pnl)}">${fmtARS(rf.pnl)} (${fmtPct(rf.pnlPct)})</div></div>
         <div class="mini-metric"><div class="lbl">Binance · Cripto</div><div class="val num">${fmtUSD(cr.total, true)}</div>
           <div class="s num ${signo(cr.pnl)}">${fmtUSD(cr.pnl, true)} (${fmtPct(cr.pnlPct)})</div></div>
-        <div class="mini-metric"><div class="lbl">Efectivo</div><div class="val num">${fmtUSD(pat.efectivo)}</div>
+        <div class="mini-metric"><div class="lbl">Efectivo</div><div class="val num">${fmtUSD(pat.efectivo)} + ${fmtARS(pat.efectivoARS)}</div>
           <div class="s muted">editable en ⚙ Ajustes</div></div>
         <div class="mini-metric"><div class="lbl">CCL</div><div class="val num">${S.ccl ? fmtARS(S.ccl) : '—'}</div>
           <div class="s muted">${esc(S.cclFuente || '')}</div></div>
@@ -627,22 +695,25 @@ function vPortfolio() {
       <button class="btn btn-chico btn-fantasma" id="btn-inf-inv" style="margin-top:12px">📋 Informe de inversiones</button>
     </div>
 
+    ${cardPilares(pilares)}
+
     ${cardEvolucion()}
 
     <div class="card solo-mobile">
       <h2>Posiciones</h2>
       <div class="lista-mov">
         ${iol.filas.map((p) => posCompacta(p.simbolo, fmtARS(p.valorizado), p.pnlPct)).join('')}
+        ${rf.filas.map((p) => posCompacta(p.ticker, fmtARS(p.valorizado_ars), p.pnlPct)).join('')}
         ${cr.filas.map((p) => posCompacta(p.simbolo, fmtUSD(p.valorizado, true), p.pnlPct)).join('')}
       </div>
       <p class="muted s" style="margin:10px 0 0">Para editar cantidades y precios de compra, entrá desde la compu.</p>
     </div>
 
     <div class="card solo-desktop">
-      <h2>IOL · CEDEARs <span class="s muted" style="text-transform:none;letter-spacing:0">cantidad y PPC editables</span></h2>
+      <h2>IOL · CEDEARs <span class="s muted" style="text-transform:none;letter-spacing:0">cantidad, PPC, clase y subtipo editables</span></h2>
       <div style="margin:0 0 16px">${panelDonut(iol.filas.map((p) => ({ label: p.simbolo, valor: p.valorizado })), (v) => fmtARS(v))}</div>
       <div class="tabla-scroll"><table>
-        <thead><tr><th>Activo</th><th>Cantidad</th><th>PPC</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th></th></tr></thead>
+        <thead><tr><th>Activo</th><th>Cantidad</th><th>PPC</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th>Subtipo</th><th></th></tr></thead>
         <tbody>
           ${iol.filas.map((p) => `<tr>
             <td><b>${esc(p.simbolo)}</b><span class="sub">${esc(p.nombre)}</span></td>
@@ -653,21 +724,48 @@ function vPortfolio() {
               : `<input class="celda-edit num" data-iol="${p.id}" data-campo="precio_manual" type="number" step="any" value="${p.precio_manual ?? ''}" placeholder="manual">`}</td>
             <td class="num">${fmtARS(p.valorizado)}</td>
             <td class="num ${signo(p.pnl)}">${fmtARS(p.pnl)}<span class="sub ${signo(p.pnl)}">${fmtPct(p.pnlPct)}</span></td>
+            <td><select class="celda-edit" data-iol="${p.id}" data-campo="subtipo" data-txt="1">
+              ${Object.entries(SUB_IOL).map(([v, l]) => `<option value="${v}" ${p.subtipo === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select></td>
             <td><button class="btn btn-chico btn-fantasma" data-del-iol="${p.id}" title="Borrar posición">✕</button></td>
           </tr>`).join('')}
         </tbody>
         <tfoot><tr><td>Total</td><td></td><td class="num">${fmtARS(iol.costo)}</td><td></td>
           <td class="num">${fmtARS(iol.total)}</td>
-          <td class="num ${signo(iol.pnl)}">${fmtARS(iol.pnl)}<span class="sub ${signo(iol.pnl)}">${fmtPct(iol.pnlPct)}</span></td><td></td></tr></tfoot>
+          <td class="num ${signo(iol.pnl)}">${fmtARS(iol.pnl)}<span class="sub ${signo(iol.pnl)}">${fmtPct(iol.pnlPct)}</span></td><td></td><td></td></tr></tfoot>
       </table></div>
       <button class="btn btn-chico btn-fantasma" id="btn-agregar-iol" style="margin-top:12px">+ Agregar CEDEAR</button>
     </div>
 
     <div class="card solo-desktop">
-      <h2>Binance · Cripto</h2>
+      <h2>Renta Fija · ONs <span class="s muted" style="text-transform:none;letter-spacing:0">valorizado editable a mano (sin cotización en vivo)</span></h2>
+      ${rf.filas.length ? `<div class="tabla-scroll"><table>
+        <thead><tr><th>Título</th><th>Nominales</th><th>Costo</th><th>Valorizado</th><th>PnL</th><th>Vto.</th><th>Días</th><th>Tasa</th><th></th></tr></thead>
+        <tbody>
+          ${rf.filas.map((p) => `<tr>
+            <td><b>${esc(p.ticker)}</b><span class="sub">${esc(p.nombre)}${p.amortizacion ? ` · ${p.amortizacion}` : ''}</span></td>
+            <td><input class="celda-edit num" data-rf="${p.id}" data-campo="nominales" type="number" step="any" value="${p.nominales}"></td>
+            <td><input class="celda-edit num" data-rf="${p.id}" data-campo="costo_ars" type="number" step="any" value="${p.costo_ars}"></td>
+            <td><input class="celda-edit num" data-rf="${p.id}" data-campo="valorizado_ars" type="number" step="any" value="${p.valorizado_ars}"></td>
+            <td class="num ${signo(p.pnl)}">${fmtARS(p.pnl)}<span class="sub ${signo(p.pnl)}">${fmtPct(p.pnlPct)}</span></td>
+            <td class="num">${p.vencimiento ? fechaCorta(p.vencimiento) : '—'}</td>
+            <td class="num">${p.dias != null ? fmtNum(p.dias) : '—'}</td>
+            <td class="num">${p.tasa_cupon != null ? `${p.tasa_cupon}%` : '—'}</td>
+            <td><button class="btn btn-chico btn-fantasma" data-del-rf="${p.id}" title="Borrar posición">✕</button></td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot><tr><td>Total</td><td></td><td class="num">${fmtARS(rf.costo)}</td>
+          <td class="num">${fmtARS(rf.total)}</td>
+          <td class="num ${signo(rf.pnl)}">${fmtARS(rf.pnl)}<span class="sub ${signo(rf.pnl)}">${fmtPct(rf.pnlPct)}</span></td><td></td><td></td><td></td><td></td></tr></tfoot>
+      </table></div>` : `<div class="vacio">Todavía no cargaste ONs u otros títulos de renta fija.</div>`}
+      <button class="btn btn-chico btn-fantasma" id="btn-agregar-rf" style="margin-top:12px">+ Agregar ON</button>
+    </div>
+
+    <div class="card solo-desktop">
+      <h2>Binance · Cripto <span class="s muted" style="text-transform:none;letter-spacing:0">core/satélite editable</span></h2>
       <div style="margin:0 0 16px">${panelDonut(cr.filas.map((p) => ({ label: p.simbolo, valor: p.valorizado })), (v) => fmtUSD(v, true))}</div>
       <div class="tabla-scroll"><table>
-        <thead><tr><th>Activo</th><th>Cantidad</th><th>Precio compra</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th></th></tr></thead>
+        <thead><tr><th>Activo</th><th>Cantidad</th><th>Precio compra</th><th>Precio actual</th><th>Valorizado</th><th>PnL</th><th>Subtipo</th><th></th></tr></thead>
         <tbody>
           ${cr.filas.map((p) => `<tr>
             <td><b>${esc(p.simbolo)}</b><span class="sub">${esc(p.nombre)}</span></td>
@@ -676,12 +774,15 @@ function vPortfolio() {
             <td class="num">${fmtUSD(p.px, true)}</td>
             <td class="num">${fmtUSD(p.valorizado, true)}</td>
             <td class="num ${signo(p.pnl)}">${fmtUSD(p.pnl, true)}<span class="sub ${signo(p.pnl)}">${fmtPct(p.pnlPct)}</span></td>
+            <td><select class="celda-edit" data-cr="${p.id}" data-campo="subtipo" data-txt="1">
+              ${Object.entries(SUB_CR).map(([v, l]) => `<option value="${v}" ${p.subtipo === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select></td>
             <td><button class="btn btn-chico btn-fantasma" data-del-cr="${p.id}" title="Borrar posición">✕</button></td>
           </tr>`).join('')}
         </tbody>
         <tfoot><tr><td>Total</td><td></td><td class="num">${fmtUSD(cr.costo, true)}</td><td></td>
           <td class="num">${fmtUSD(cr.total, true)}</td>
-          <td class="num ${signo(cr.pnl)}">${fmtUSD(cr.pnl, true)}<span class="sub ${signo(cr.pnl)}">${fmtPct(cr.pnlPct)}</span></td><td></td></tr></tfoot>
+          <td class="num ${signo(cr.pnl)}">${fmtUSD(cr.pnl, true)}<span class="sub ${signo(cr.pnl)}">${fmtPct(cr.pnlPct)}</span></td><td></td><td></td></tr></tfoot>
       </table></div>
       <button class="btn btn-chico btn-fantasma" id="btn-agregar-crypto" style="margin-top:12px">+ Agregar cripto</button>
     </div>
@@ -726,8 +827,8 @@ function panelIndependencia(objetivoUSD, actualUSD, excedentePromARS) {
 
 // ---------------- Vista: Metas ----------------
 function vMetas() {
-  const iol = calcIOL(), cr = calcCrypto();
-  const pat = calcPatrimonio(iol, cr);
+  const iol = calcIOL(), cr = calcCrypto(), rf = calcRF();
+  const pat = calcPatrimonio(iol, cr, rf);
   const gastosProm = promedio3m('gastos');
   const excedenteProm = promedio3m('excedente');
 
@@ -885,7 +986,8 @@ function postRender(vista) {
   }));
 
   vista.querySelectorAll('[data-iol]').forEach((inp) => (inp.onchange = async () => {
-    const v = num(inp.value); if (v == null) return;
+    const v = inp.dataset.txt ? inp.value : num(inp.value);
+    if (v == null) return;
     try {
       await actualizarPosicionIOL(inp.dataset.iol, { [inp.dataset.campo]: v });
       const p = S.datos.iol.find((x) => x.id === inp.dataset.iol);
@@ -895,10 +997,21 @@ function postRender(vista) {
   }));
 
   vista.querySelectorAll('[data-cr]').forEach((inp) => (inp.onchange = async () => {
-    const v = num(inp.value); if (v == null) return;
+    const v = inp.dataset.txt ? inp.value : num(inp.value);
+    if (v == null) return;
     try {
       await actualizarPosicionCrypto(inp.dataset.cr, { [inp.dataset.campo]: v });
       const p = S.datos.crypto.find((x) => x.id === inp.dataset.cr);
+      if (p) p[inp.dataset.campo] = v;
+      render(); toast('Guardado');
+    } catch (e) { toast('Error: ' + e.message, false); }
+  }));
+
+  vista.querySelectorAll('[data-rf]').forEach((inp) => (inp.onchange = async () => {
+    const v = num(inp.value); if (v == null) return;
+    try {
+      await actualizarPosicionRF(inp.dataset.rf, { [inp.dataset.campo]: v });
+      const p = S.datos.rf.find((x) => x.id === inp.dataset.rf);
       if (p) p[inp.dataset.campo] = v;
       render(); toast('Guardado');
     } catch (e) { toast('Error: ' + e.message, false); }
@@ -948,6 +1061,19 @@ function postRender(vista) {
 
   const addCr = vista.querySelector('#btn-agregar-crypto');
   if (addCr) addCr.onclick = () => abrirAgregarCrypto();
+
+  const addRf = vista.querySelector('#btn-agregar-rf');
+  if (addRf) addRf.onclick = () => abrirAgregarRF();
+
+  vista.querySelectorAll('[data-del-rf]').forEach((b) => (b.onclick = async () => {
+    const p = S.datos.rf.find((x) => x.id === b.dataset.delRf);
+    if (!confirm(`¿Borrar ${p.ticker} del portfolio?`)) return;
+    try {
+      await borrarPosicionRF(p.id);
+      S.datos.rf = S.datos.rf.filter((x) => x.id !== p.id);
+      render(); toast('Posición borrada');
+    } catch (e) { toast('No se pudo borrar: ' + e.message, false); }
+  }));
 
   vista.querySelectorAll('[data-del-iol]').forEach((b) => (b.onclick = async () => {
     const p = S.datos.iol.find((x) => x.id === b.dataset.delIol);
@@ -1137,28 +1263,81 @@ function abrirAjustes() {
         <input id="aj-sesion" type="number" inputmode="decimal" step="any" min="0" value="${aj.valor_sesion ?? 0}"></div>
       <div class="campo"><label>Valor domicilio (ARS) — mínimo ético</label>
         <input id="aj-domicilio" type="number" inputmode="decimal" step="any" min="0" value="${aj.valor_domicilio ?? 35000}"></div>
-      <div class="campo"><label>Efectivo en mano (USD)</label>
-        <input id="aj-efectivo" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_usd ?? 0}"></div>
+      <div class="campos-2">
+        <div class="campo"><label>Efectivo en mano (USD)</label>
+          <input id="aj-efectivo" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_usd ?? 0}"></div>
+        <div class="campo"><label>Efectivo en mano (ARS)</label>
+          <input id="aj-efectivo-ars" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_ars ?? 0}"></div>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button type="button" class="btn btn-fantasma" id="aj-cats">🏷️ Editar categorías</button>
         <button type="button" class="btn btn-fantasma" id="aj-recurrentes">🔁 Gastos recurrentes</button>
+        <button type="button" class="btn btn-fantasma" id="aj-targets">🎯 Objetivos de asignación</button>
       </div>
       <button class="btn btn-primario" type="submit">Guardar ajustes</button>
     </form>
   `);
   $('#aj-cats').onclick = () => abrirCategorias();
   $('#aj-recurrentes').onclick = () => abrirRecurrentes();
+  $('#aj-targets').onclick = () => abrirTargets();
   $('#form-aj').onsubmit = async (ev) => {
     ev.preventDefault();
     const parcial = {
       valor_sesion: num($('#aj-sesion').value) ?? 0,
       valor_domicilio: num($('#aj-domicilio').value) ?? 35000,
       efectivo_usd: num($('#aj-efectivo').value) ?? 0,
+      efectivo_ars: num($('#aj-efectivo-ars').value) ?? 0,
     };
     try {
       await guardarAjustes(parcial);
       S.datos.ajustes = { ...(S.datos.ajustes || {}), ...parcial };
       cerrarSheet(); render(); toast('Ajustes guardados ✔');
+    } catch (e) { toast('Error: ' + e.message, false); }
+  };
+}
+
+// ---------------- Sheet: objetivos de asignación por pilar ----------------
+function abrirTargets() {
+  const aj = S.datos.ajustes || {};
+  const t = {
+    liquidez: aj.target_liquidez ?? 15,
+    renta_fija: aj.target_renta_fija ?? 30,
+    renta_variable: aj.target_renta_variable ?? 35,
+    cripto: aj.target_cripto ?? 20,
+  };
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Objetivos de asignación</h2>
+    <p class="muted s" style="margin:0 0 14px">El % de cartera que querés en cada pilar. Deberían sumar 100%.</p>
+    <form id="form-targets" style="display:grid;gap:12px">
+      ${['liquidez', 'renta_fija', 'renta_variable', 'cripto'].map((k) => `
+      <div class="campo"><label>${esc(PILAR_LABEL[k])} (%)</label>
+        <input id="tg-${k}" type="number" inputmode="decimal" step="any" min="0" max="100" value="${t[k]}"></div>`).join('')}
+      <p class="s muted" id="tg-suma" style="margin:0"></p>
+      <button class="btn btn-primario" type="submit">Guardar objetivos</button>
+      <button type="button" class="btn btn-fantasma" id="tg-volver" style="justify-self:start">← Volver</button>
+    </form>
+  `);
+  $('#tg-volver').onclick = () => abrirAjustes();
+  const suma = () => {
+    const total = ['liquidez', 'renta_fija', 'renta_variable', 'cripto']
+      .reduce((a, k) => a + (num($(`#tg-${k}`).value) || 0), 0);
+    $('#tg-suma').textContent = `Suma actual: ${total}%` + (total !== 100 ? ' — debería dar 100%' : ' ✔');
+    $('#tg-suma').style.color = total === 100 ? 'var(--pos)' : 'var(--neg)';
+  };
+  ['liquidez', 'renta_fija', 'renta_variable', 'cripto'].forEach((k) => ($(`#tg-${k}`).oninput = suma));
+  suma();
+  $('#form-targets').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const parcial = {
+      target_liquidez: num($('#tg-liquidez').value) ?? 15,
+      target_renta_fija: num($('#tg-renta_fija').value) ?? 30,
+      target_renta_variable: num($('#tg-renta_variable').value) ?? 35,
+      target_cripto: num($('#tg-cripto').value) ?? 20,
+    };
+    try {
+      await guardarAjustes(parcial);
+      S.datos.ajustes = { ...(S.datos.ajustes || {}), ...parcial };
+      cerrarSheet(); render(); toast('Objetivos guardados ✔');
     } catch (e) { toast('Error: ' + e.message, false); }
   };
 }
@@ -1206,8 +1385,8 @@ function descargarCSV(movs) {
 
 // ---------------- Informe de ahorros (texto copiable p/ proyecto de Claude) ----------------
 function generarInforme() {
-  const iol = calcIOL(), cr = calcCrypto();
-  const pat = calcPatrimonio(iol, cr);
+  const iol = calcIOL(), cr = calcCrypto(), rf = calcRF();
+  const pat = calcPatrimonio(iol, cr, rf);
   const mesAct = mesActualKey();
   const r = resumenMes(mesAct);
   const gastosProm = promedio3m('gastos');
@@ -1335,8 +1514,8 @@ function abrirInforme() {
 
 // ---------------- Informe de balance de inversiones (p/ chat de consultoría) ----------------
 function generarInformeInversiones() {
-  const iol = calcIOL(), cr = calcCrypto();
-  const pat = calcPatrimonio(iol, cr);
+  const iol = calcIOL(), cr = calcCrypto(), rf = calcRF();
+  const pat = calcPatrimonio(iol, cr, rf);
   const hoy = new Date().toLocaleDateString('es-AR', { day: 'numeric', month: 'long', year: 'numeric' });
   const al = S.preciosAl ? S.preciosAl.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : null;
   const L = [];
@@ -1350,12 +1529,33 @@ function generarInformeInversiones() {
   L.push('## Composición del patrimonio');
   L.push(`- **Total: ${fmtARS(pat.ars)} (${fmtUSD(pat.usd)})**`);
   if (pat.ars > 0 && S.ccl) {
-    const crArs = cr.total * S.ccl, efArs = pat.efectivo * S.ccl;
+    const crArs = cr.total * S.ccl, efArs = pat.efectivo * S.ccl + pat.efectivoARS;
     L.push(`- CEDEARs (IOL): ${fmtARS(iol.total)} — ${((iol.total / pat.ars) * 100).toFixed(1)}%`);
+    L.push(`- Renta fija (ONs): ${fmtARS(rf.total)} — ${((rf.total / pat.ars) * 100).toFixed(1)}%`);
     L.push(`- Cripto (Binance): ${fmtUSD(cr.total, true)} ≈ ${fmtARS(crArs)} — ${((crArs / pat.ars) * 100).toFixed(1)}%`);
-    L.push(`- Efectivo: ${fmtUSD(pat.efectivo)} ≈ ${fmtARS(efArs)} — ${((efArs / pat.ars) * 100).toFixed(1)}%`);
+    L.push(`- Efectivo: ${fmtUSD(pat.efectivo)} + ${fmtARS(pat.efectivoARS)} ≈ ${fmtARS(efArs)} — ${((efArs / pat.ars) * 100).toFixed(1)}%`);
   }
   L.push('');
+
+  const pilares = calcPilares(iol, cr, rf, pat);
+  if (pilares) {
+    L.push('## Asignación por clase de activo — actual vs. objetivo');
+    L.push('| Pilar | Actual | Objetivo | Desvío |');
+    L.push('|---|---|---|---|');
+    pilares.forEach((p) => L.push(`| ${PILAR_LABEL[p.clave]} | ${p.actualPct.toFixed(1)}% | ${p.targetPct.toFixed(0)}% | ${p.desvio >= 0 ? '+' : ''}${p.desvio.toFixed(1)} pp |`));
+    L.push('');
+  }
+
+  if (rf.filas.length) {
+    L.push('## Cartera de Renta Fija — ONs (ARS)');
+    L.push('| Título | Nominales | Costo | Valorizado | PnL | Vencimiento | Días | Tasa cupón | Amortización |');
+    L.push('|---|---|---|---|---|---|---|---|---|');
+    rf.filas.forEach((p) => {
+      L.push(`| ${p.ticker}${p.nombre ? ` (${p.nombre})` : ''} | ${fmtNum(p.nominales)} | ${fmtARS(p.costo_ars)} | ${fmtARS(p.valorizado_ars)} | ${fmtARS(p.pnl)} (${fmtPct(p.pnlPct)}) | ${p.vencimiento || '—'} | ${p.dias != null ? p.dias : '—'} | ${p.tasa_cupon != null ? p.tasa_cupon + '%' : '—'} | ${p.amortizacion || '—'} |`);
+    });
+    L.push(`| **Total** | | **${fmtARS(rf.costo)}** | **${fmtARS(rf.total)}** | **${fmtARS(rf.pnl)} (${fmtPct(rf.pnlPct)})** | | | | |`);
+    L.push('');
+  }
 
   if (iol.filas.length) {
     L.push('## Cartera IOL — CEDEARs / FCI (ARS)');
@@ -1828,6 +2028,78 @@ function abrirAgregarCrypto() {
       S.datos.crypto.sort((a, b) => a.simbolo.localeCompare(b.simbolo));
       cerrarSheet(); render(); toast(`${simbolo} agregado ✔`);
       refrescarPrecios();
+    } catch (e) { toast('No se pudo agregar: ' + e.message, false); }
+  };
+}
+
+// ---------------- Sheet: agregar renta fija (ON) ----------------
+function abrirAgregarRF() {
+  abrirSheet(`
+    <h2 style="margin:0 0 4px;font-size:18px">Agregar título de renta fija</h2>
+    <p class="muted s" style="margin:0 0 14px">Sin cotización en vivo: cargá costo y valorizado, y actualizá el valorizado a mano cuando tengas un precio nuevo.</p>
+    <form id="form-rf" style="display:grid;gap:12px">
+      <div class="campos-2">
+        <div class="campo"><label>Ticker</label>
+          <input id="rf-ticker" type="text" maxlength="20" placeholder="MGCNO" required></div>
+        <div class="campo"><label>Nombre</label>
+          <input id="rf-nombre" type="text" maxlength="80" placeholder="Pampa Energía Clase 22"></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Nominales</label>
+          <input id="rf-nominales" type="number" inputmode="decimal" step="any" min="0" required></div>
+        <div class="campo"><label>Amortización</label>
+          <select id="rf-amort" style="${SELECT_CSS}">
+            <option value="bullet">Bullet</option>
+            <option value="amortizable">Amortizable</option>
+          </select></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Costo total (ARS)</label>
+          <input id="rf-costo" type="number" inputmode="decimal" step="any" min="0" required></div>
+        <div class="campo"><label>Valorizado actual (ARS)</label>
+          <input id="rf-valorizado" type="number" inputmode="decimal" step="any" min="0" required></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Fecha de compra</label>
+          <input id="rf-fecha" type="date" value="${hoyISO()}"></div>
+        <div class="campo"><label>Vencimiento</label>
+          <input id="rf-vencimiento" type="date"></div>
+      </div>
+      <div class="campos-2">
+        <div class="campo"><label>Tasa cupón (%)</label>
+          <input id="rf-tasa" type="number" inputmode="decimal" step="any" min="0"></div>
+        <div class="campo"><label>Nota (opcional)</label>
+          <input id="rf-nota" type="text" maxlength="80" placeholder="ej: orden #..."></div>
+      </div>
+      <button class="btn btn-primario" type="submit">Agregar posición</button>
+    </form>
+  `);
+  $('#form-rf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const ticker = $('#rf-ticker').value.trim().toUpperCase();
+    const nominales = num($('#rf-nominales').value);
+    const costo = num($('#rf-costo').value);
+    const valorizado = num($('#rf-valorizado').value);
+    if (!ticker || nominales == null || costo == null || valorizado == null)
+      return toast('Completá ticker, nominales, costo y valorizado', false);
+    const pos = {
+      ticker,
+      nombre: $('#rf-nombre').value.trim(),
+      subtipo: 'on',
+      nominales,
+      costo_ars: costo,
+      valorizado_ars: valorizado,
+      fecha_compra: $('#rf-fecha').value || null,
+      vencimiento: $('#rf-vencimiento').value || null,
+      tasa_cupon: num($('#rf-tasa').value),
+      amortizacion: $('#rf-amort').value,
+      nota: $('#rf-nota').value.trim(),
+    };
+    try {
+      const creado = await insertarPosicionRF(pos);
+      S.datos.rf.push(creado);
+      S.datos.rf.sort((a, b) => a.ticker.localeCompare(b.ticker));
+      cerrarSheet(); render(); toast(`${ticker} agregado ✔`);
     } catch (e) { toast('No se pudo agregar: ' + e.message, false); }
   };
 }

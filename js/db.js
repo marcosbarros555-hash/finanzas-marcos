@@ -49,8 +49,9 @@ export async function cargarTodo() {
   ]);
   [aj, iol, cr, mov, metas].forEach((r) => lanza(r.error));
 
-  // Recurrentes y patrimonio histórico: tolerantes a que la tabla todavía no exista (migración pendiente)
-  let recurrentes = [], patrimonioHist = [];
+  // Recurrentes, patrimonio histórico y renta fija: tolerantes a que la tabla
+  // todavía no exista (migración pendiente) — no rompen la carga del resto.
+  let recurrentes = [], patrimonioHist = [], rf = [];
   try {
     const rec = await sb.from('recurrentes').select('*').order('created_at');
     if (!rec.error) recurrentes = rec.data || [];
@@ -58,6 +59,10 @@ export async function cargarTodo() {
   try {
     const ph = await sb.from('patrimonio_hist').select('*').order('mes');
     if (!ph.error) patrimonioHist = ph.data || [];
+  } catch (e) { /* tabla aún no creada */ }
+  try {
+    const r = await sb.from('portfolio_rf').select('*').order('ticker');
+    if (!r.error) rf = r.data || [];
   } catch (e) { /* tabla aún no creada */ }
 
   return {
@@ -68,6 +73,7 @@ export async function cargarTodo() {
     metas: metas.data || [],
     recurrentes,
     patrimonioHist,
+    rf,
   };
 }
 
@@ -102,6 +108,23 @@ export async function actualizarPosicionIOL(id, parcial) {
 
 export async function actualizarPosicionCrypto(id, parcial) {
   const { error } = await sb.from('portfolio_crypto').update(parcial).eq('id', id);
+  lanza(error);
+}
+
+// ---------------- Renta fija (ONs) ----------------
+export async function insertarPosicionRF(pos) {
+  const { data, error } = await sb.from('portfolio_rf').insert(pos).select().single();
+  lanza(error);
+  return data;
+}
+
+export async function actualizarPosicionRF(id, parcial) {
+  const { error } = await sb.from('portfolio_rf').update(parcial).eq('id', id);
+  lanza(error);
+}
+
+export async function borrarPosicionRF(id) {
+  const { error } = await sb.from('portfolio_rf').delete().eq('id', id);
   lanza(error);
 }
 
