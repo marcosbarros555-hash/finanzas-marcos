@@ -418,14 +418,19 @@ function vInicio() {
     <div class="card">
       <h2>Gastos recurrentes a confirmar
         <span class="s muted num" style="text-transform:none;letter-spacing:0;font-weight:600">${recPendientes.length}</span></h2>
-      <div class="lista-mov">${recPendientes.map((rec) => `<div class="mov">
+      <div class="lista-mov">${recPendientes.map((rec) => `<div class="mov" style="align-items:flex-start;flex-wrap:wrap;gap:8px 10px">
         <div class="icono">${EMOJI[rec.categoria] || '🔁'}</div>
-        <div class="cuerpo"><div class="cat">${esc(rec.categoria)}</div><div class="det">${esc(rec.descripcion || 'gasto fijo mensual')}</div></div>
+        <div class="cuerpo" style="flex-basis:140px">
+          <div class="cat">${esc(rec.categoria)}</div><div class="det">${esc(rec.descripcion || 'gasto fijo mensual')}</div>
+          <label class="s muted" style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer">
+            <input type="checkbox" data-recfijo="${rec.id}" style="width:14px;height:14px;flex:none">
+            Guardar como nuevo valor fijo (ej: subió)</label>
+        </div>
         <input class="celda-edit num" data-recmonto="${rec.id}" type="number" step="any" value="${rec.monto}" style="max-width:120px">
         <button class="btn btn-chico btn-primario" data-recconf="${rec.id}">Confirmar</button>
         <button class="borrar" data-recskip="${rec.id}" title="Saltar este mes" aria-label="Saltar este mes">✕</button>
       </div>`).join('')}</div>
-      <p class="muted s" style="margin:10px 0 0">Ajustá el monto si hace falta y <b>Confirmá</b> para cargarlo como gasto del mes, o ✕ para saltarlo.</p>
+      <p class="muted s" style="margin:10px 0 0">Ajustá el monto si cambió y <b>Confirmá</b> para cargarlo como gasto del mes. Si tildás la casilla, ese monto queda como el nuevo valor fijo para los próximos meses; si no, es solo para esta vez. ✕ para saltarlo.</p>
     </div>` : ''}
 
     <div class="card">
@@ -901,15 +906,19 @@ function postRender(vista) {
     const inp = vista.querySelector(`[data-recmonto="${rec.id}"]`);
     const monto = num(inp?.value) ?? rec.monto;
     if (monto == null || monto <= 0) return toast('Monto inválido', false);
+    const fijarNuevoValor = vista.querySelector(`[data-recfijo="${rec.id}"]`)?.checked;
     try {
       const creado = await agregarMovimiento({
         fecha: hoyISO(), tipo: 'egreso', categoria: rec.categoria,
         descripcion: rec.descripcion || '', cantidad: null, monto,
       });
       S.datos.movimientos.unshift(creado);
-      await actualizarRecurrente(rec.id, { ultimo_mes: mesActualKey() });
-      rec.ultimo_mes = mesActualKey();
-      render(); toast(`${esc(rec.categoria)} cargado ✔`);
+      const parcial = { ultimo_mes: mesActualKey() };
+      if (fijarNuevoValor && monto !== rec.monto) parcial.monto = monto;
+      await actualizarRecurrente(rec.id, parcial);
+      Object.assign(rec, parcial);
+      render();
+      toast(fijarNuevoValor && parcial.monto ? `${esc(rec.categoria)} cargado ✔ — nuevo valor fijo: ${fmtARS(monto)}` : `${esc(rec.categoria)} cargado ✔`);
     } catch (e) { toast('No se pudo confirmar: ' + e.message, false); }
   }));
 
@@ -1264,11 +1273,12 @@ function abrirAjustes() {
       <div class="campo"><label>Valor domicilio (ARS) — mínimo ético</label>
         <input id="aj-domicilio" type="number" inputmode="decimal" step="any" min="0" value="${aj.valor_domicilio ?? 35000}"></div>
       <div class="campos-2">
-        <div class="campo"><label>Efectivo en mano (USD)</label>
+        <div class="campo"><label>Dólares físicos que tenés</label>
           <input id="aj-efectivo" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_usd ?? 0}"></div>
-        <div class="campo"><label>Efectivo en mano (ARS)</label>
+        <div class="campo"><label>Pesos en mano / caja (ARS)</label>
           <input id="aj-efectivo-ars" type="number" inputmode="decimal" step="any" min="0" value="${aj.efectivo_ars ?? 0}"></div>
       </div>
+      <p class="muted s" style="margin:-4px 0 0">Cargá acá solo dólares que ya compraste, no plata que pensás convertir a futuro — eso lo sumás cuando efectivamente lo hagas.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button type="button" class="btn btn-fantasma" id="aj-cats">🏷️ Editar categorías</button>
         <button type="button" class="btn btn-fantasma" id="aj-recurrentes">🔁 Gastos recurrentes</button>
